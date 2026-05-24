@@ -6,6 +6,7 @@ export interface Persona {
   description: string;
   systemPrompt: string;
   voice: TTSVoice;
+  voiceInstructions: string;
   speakingStyle: string;
   accentRegion: string;
 }

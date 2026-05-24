@@ -42,8 +42,10 @@ export async function POST(req: NextRequest) {
       const history: HistoryMessage[] = historyJson ? JSON.parse(historyJson) : [];
 
       const rawTtsModel = formData.get("ttsModel") as string | null;
-      const ttsModel: "tts-1" | "tts-1-hd" =
-        rawTtsModel === "tts-1" || rawTtsModel === "tts-1-hd" ? rawTtsModel : "tts-1-hd";
+      const ttsModel: "gpt-4o-mini-tts" | "tts-1" | "tts-1-hd" =
+        rawTtsModel === "tts-1" ? "tts-1"
+        : rawTtsModel === "tts-1-hd" ? "tts-1-hd"
+        : "gpt-4o-mini-tts";
 
       const rawGptModel = formData.get("gptModel") as string | null;
       const gptModel: "gpt-4o-mini" | "gpt-4o" =
@@ -88,6 +90,7 @@ export async function POST(req: NextRequest) {
           voice: persona!.voice as TTSVoice,
           input: trimmed,
           response_format: "mp3",
+          ...(ttsModel === "gpt-4o-mini-tts" && { instructions: persona!.voiceInstructions }),
         });
 
         // Collect TTS stream chunks and send as one audio_chunk event
