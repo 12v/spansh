@@ -79,29 +79,6 @@ export function SettingsPanel({ settings, onUpdate, onClose }: SettingsPanelProp
           </div>
         </div>
 
-        {/* TTS speed */}
-        <div className="mb-5">
-          <div className="flex items-baseline justify-between mb-0.5">
-            <p className="text-white text-sm font-medium">Velocidad</p>
-            <p className="text-indigo-400 text-sm font-mono">{settings.ttsSpeed.toFixed(2)}×</p>
-          </div>
-          <p className="text-gray-500 text-xs mb-3">Slow down to catch every word</p>
-          <input
-            type="range"
-            min={0.5}
-            max={2.0}
-            step={0.05}
-            value={settings.ttsSpeed}
-            onChange={(e) => onUpdate("ttsSpeed", parseFloat(e.target.value))}
-            className="w-full accent-indigo-500 cursor-pointer"
-          />
-          <div className="flex justify-between text-xs text-gray-600 mt-1 select-none">
-            <span>Lento</span>
-            <span>Normal</span>
-            <span>Rápido</span>
-          </div>
-        </div>
-
         {/* GPT model */}
         <div className="mb-5">
           <p className="text-white text-sm font-medium mb-0.5">Modelo de respuesta</p>

@@ -4,14 +4,12 @@ import { useCallback, useState } from "react";
 
 export interface Settings {
   ttsModel: "tts-1" | "tts-1-hd";
-  ttsSpeed: number;
   gptModel: "gpt-4o-mini" | "gpt-4o";
   listeningMode: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   ttsModel: "tts-1-hd",
-  ttsSpeed: 1.0,
   gptModel: "gpt-4o-mini",
   listeningMode: false,
 };
