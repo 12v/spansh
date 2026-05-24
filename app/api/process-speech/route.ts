@@ -93,26 +93,43 @@ export async function POST(req: NextRequest) {
         await writer.write(sseEvent({ type: "audio_chunk", data: merged.toString("base64") }));
       }
 
+      // TTS runs in a separate promise chain so it never blocks GPT text streaming.
+      // Each sentence is chained onto the previous to maintain playback order.
+      let ttsChain = Promise.resolve();
+      let ttsError: Error | null = null;
+
+      function scheduleTts(sentence: string) {
+        ttsChain = ttsChain.then(async () => {
+          if (ttsError) return; // stop chain after first error
+          try {
+            await ttsAndStream(sentence);
+          } catch (err) {
+            ttsError = err instanceof Error ? err : new Error(String(err));
+          }
+        });
+      }
+
       for await (const chunk of completion) {
         const delta = chunk.choices[0]?.delta?.content ?? "";
         if (!delta) continue;
 
-        // Stream text tokens to client immediately for live display
+        // Text flows to client without waiting for TTS
         await writer.write(sseEvent({ type: "text_delta", text: delta }));
         sentenceBuffer += delta;
 
-        // Flush complete sentences to TTS
         let match: RegExpExecArray | null;
         while ((match = SENTENCE_END.exec(sentenceBuffer)) !== null) {
           const cutAt = match.index + match[0].length - 1;
           const sentence = sentenceBuffer.slice(0, cutAt);
           sentenceBuffer = sentenceBuffer.slice(cutAt).trimStart();
-          await ttsAndStream(sentence);
+          scheduleTts(sentence);
         }
       }
 
-      // TTS any remaining text
-      await ttsAndStream(sentenceBuffer);
+      // Schedule TTS for any remaining text, then wait for all TTS to finish
+      scheduleTts(sentenceBuffer);
+      await ttsChain;
+      if (ttsError) throw ttsError;
 
       await writer.write(sseEvent({ type: "done", transcript, reply: fullReply }));
     } catch (err) {
