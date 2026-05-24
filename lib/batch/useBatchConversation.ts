@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import type { Persona } from "@/lib/personas/types";
+import type { Settings } from "@/lib/settings/useSettings";
 
 export type BatchState = "idle" | "recording" | "processing" | "error";
 
@@ -135,7 +136,7 @@ export function useBatchConversation(persona: Persona | null) {
 
   const SILENCE_THRESHOLD = 0.01;
 
-  const stopAndProcess = useCallback(async () => {
+  const stopAndProcess = useCallback(async (settings: Pick<Settings, "ttsModel" | "ttsSpeed" | "gptModel">) => {
     const recorder = recorderRef.current;
     if (!recorder || batchState !== "recording") return;
 
@@ -176,6 +177,9 @@ export function useBatchConversation(persona: Persona | null) {
       formData.append("audio", blob, `recording.${ext}`);
       formData.append("personaId", persona!.id);
       formData.append("history", JSON.stringify(messagesRef.current));
+      formData.append("ttsModel", settings.ttsModel);
+      formData.append("ttsSpeed", String(settings.ttsSpeed));
+      formData.append("gptModel", settings.gptModel);
 
       const res = await fetch("/api/process-speech", { method: "POST", body: formData });
 

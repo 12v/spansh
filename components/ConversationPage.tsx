@@ -1,8 +1,11 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import { Settings } from "lucide-react";
 import type { Persona } from "@/lib/personas/types";
 import { useBatchConversation } from "@/lib/batch/useBatchConversation";
+import { useSettings } from "@/lib/settings/useSettings";
+import { SettingsPanel } from "./SettingsPanel";
 import { PersonaSelector } from "./PersonaSelector";
 import { PushToTalkButton } from "./PushToTalkButton";
 
@@ -15,8 +18,11 @@ interface ConversationPageProps {
 export function ConversationPage({ personas }: ConversationPageProps) {
   const [selectedPersona, setSelectedPersona] = useState<Persona | null>(null);
   const [showHoldHint, setShowHoldHint] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const holdHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pressStartRef = useRef(0);
+
+  const { settings, updateSetting } = useSettings();
 
   const {
     batchState,
@@ -60,7 +66,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
       setShowHoldHint(true);
       holdHintTimerRef.current = setTimeout(() => setShowHoldHint(false), 2500);
     } else {
-      stopAndProcess();
+      stopAndProcess(settings);
     }
   }, [cancelRecording, stopAndProcess]);
 
@@ -95,15 +101,32 @@ export function ConversationPage({ personas }: ConversationPageProps) {
           <h1 className="text-xl font-bold text-white tracking-tight">spansh</h1>
           <p className="text-xs text-gray-500 mt-0.5">Práctica de conversación en español</p>
         </div>
-        {selectedPersona && (
+        <div className="flex items-center gap-3">
+          {selectedPersona && (
+            <button
+              onClick={handleReset}
+              className="text-sm text-gray-400 hover:text-white transition-colors"
+            >
+              Cambiar personaje
+            </button>
+          )}
           <button
-            onClick={handleReset}
-            className="text-sm text-gray-400 hover:text-white transition-colors"
+            onClick={() => setSettingsOpen(true)}
+            className="text-gray-500 hover:text-white transition-colors"
+            aria-label="Ajustes"
           >
-            Cambiar personaje
+            <Settings className="w-5 h-5" />
           </button>
-        )}
+        </div>
       </div>
+
+      {settingsOpen && (
+        <SettingsPanel
+          settings={settings}
+          onUpdate={updateSetting}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col items-center justify-center w-full py-8 gap-8">
@@ -131,9 +154,11 @@ export function ConversationPage({ personas }: ConversationPageProps) {
                       <div className={`self-end max-w-xs rounded-2xl bg-indigo-700 px-4 py-2.5 text-sm text-white transition-opacity ${dim ? "opacity-40" : ""}`}>
                         {lastUser.content}
                       </div>
-                      <div className={`self-start max-w-xs rounded-2xl bg-gray-800 px-4 py-2.5 text-sm text-gray-100 transition-opacity ${dim ? "opacity-40" : ""}`}>
-                        {lastAssistant.content}
-                      </div>
+                      {!settings.listeningMode && (
+                        <div className={`self-start max-w-xs rounded-2xl bg-gray-800 px-4 py-2.5 text-sm text-gray-100 transition-opacity ${dim ? "opacity-40" : ""}`}>
+                          {lastAssistant.content}
+                        </div>
+                      )}
                     </>
                   );
                 })()}
@@ -150,7 +175,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
                         …
                       </div>
                     )}
-                    {currentReply && (
+                    {!settings.listeningMode && currentReply && (
                       <div className="self-start max-w-xs rounded-2xl bg-gray-800 px-4 py-2.5 text-sm text-gray-100">
                         {currentReply}
                         <span className="inline-block w-0.5 h-3.5 bg-gray-400 ml-0.5 animate-pulse align-middle" />
