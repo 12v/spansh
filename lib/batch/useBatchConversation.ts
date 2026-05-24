@@ -10,10 +10,7 @@ export interface ConversationMessage {
   content: string;
 }
 
-export function useBatchConversation(
-  persona: Persona | null,
-  audioRef: React.RefObject<HTMLAudioElement | null>
-) {
+export function useBatchConversation(persona: Persona | null) {
   const [batchState, setBatchState] = useState<BatchState>("idle");
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -26,42 +23,25 @@ export function useBatchConversation(
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
-  // Audio playback queue
-  const audioQueueRef = useRef<string[]>([]);
-  const isPlayingRef = useRef(false);
+  // Web Audio API for gapless sentence-by-sentence playback
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const nextStartTimeRef = useRef(0);
 
-  const playNextInQueue = useCallback(() => {
-    const audio = audioRef.current;
-    if (!audio || audioQueueRef.current.length === 0) {
-      isPlayingRef.current = false;
-      return;
-    }
-    isPlayingRef.current = true;
-    const url = audioQueueRef.current.shift()!;
-    audio.src = url;
-    audio.play().catch(() => {});
-    const cleanup = () => {
-      URL.revokeObjectURL(url);
-      audio.removeEventListener("ended", cleanup);
-      audio.removeEventListener("error", cleanup);
-      playNextInQueue();
-    };
-    audio.addEventListener("ended", cleanup, { once: true });
-    audio.addEventListener("error", cleanup, { once: true });
-  }, [audioRef]);
-
-  const enqueueAudio = useCallback(
-    (base64: string) => {
-      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-      const blob = new Blob([bytes], { type: "audio/mpeg" });
-      const url = URL.createObjectURL(blob);
-      audioQueueRef.current.push(url);
-      if (!isPlayingRef.current) {
-        playNextInQueue();
-      }
-    },
-    [playNextInQueue]
-  );
+  const scheduleAudioChunk = useCallback((base64: string) => {
+    const ctx = (audioCtxRef.current ??= new AudioContext());
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+    // decodeAudioData consumes the buffer, so we need a copy
+    const buffer = bytes.buffer.slice(0);
+    ctx.decodeAudioData(buffer).then((audioBuffer) => {
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+      // Schedule immediately after the previous chunk ends
+      const startAt = Math.max(ctx.currentTime, nextStartTimeRef.current);
+      source.start(startAt);
+      nextStartTimeRef.current = startAt + audioBuffer.duration;
+    }).catch(() => {});
+  }, []);
 
   const startRecording = useCallback(async () => {
     if (!persona || batchState !== "idle") return;
@@ -93,8 +73,7 @@ export function useBatchConversation(
     setBatchState("processing");
     setCurrentTranscript("");
     setCurrentReply("");
-    audioQueueRef.current = [];
-    isPlayingRef.current = false;
+    nextStartTimeRef.current = 0;
 
     await new Promise<void>((resolve) => {
       recorder.onstop = () => resolve();
@@ -134,7 +113,6 @@ export function useBatchConversation(
         if (done) break;
         buf += decoder.decode(value, { stream: true });
 
-        // Parse complete SSE events (separated by \n\n)
         const events = buf.split("\n\n");
         buf = events.pop() ?? "";
 
@@ -153,10 +131,9 @@ export function useBatchConversation(
               finalReply += data.text;
               break;
             case "audio_chunk":
-              enqueueAudio(data.data);
+              scheduleAudioChunk(data.data);
               break;
             case "done":
-              // Prefer server-provided values if present
               if (data.transcript) finalTranscript = data.transcript;
               if (data.reply) finalReply = data.reply;
               setMessages((prev) => [
@@ -178,25 +155,23 @@ export function useBatchConversation(
       setErrorMessage(msg);
       setBatchState("error");
     }
-  }, [persona, batchState, enqueueAudio]);
+  }, [persona, batchState, scheduleAudioChunk]);
 
   const reset = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     recorderRef.current = null;
     chunksRef.current = [];
-    audioQueueRef.current = [];
-    isPlayingRef.current = false;
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = "";
-    }
+    nextStartTimeRef.current = 0;
+    // Close AudioContext so the next conversation starts fresh
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
     setMessages([]);
     setCurrentTranscript("");
     setCurrentReply("");
     setErrorMessage(null);
     setBatchState("idle");
-  }, [audioRef]);
+  }, []);
 
   return {
     batchState,

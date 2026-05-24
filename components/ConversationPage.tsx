@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import type { Persona } from "@/lib/personas/types";
 import { useBatchConversation } from "@/lib/batch/useBatchConversation";
 import { PersonaSelector } from "./PersonaSelector";
@@ -12,7 +12,6 @@ interface ConversationPageProps {
 
 export function ConversationPage({ personas }: ConversationPageProps) {
   const [selectedPersona, setSelectedPersona] = useState<Persona | null>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
 
   const {
     batchState,
@@ -23,7 +22,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     startRecording,
     stopAndProcess,
     reset,
-  } = useBatchConversation(selectedPersona, audioRef);
+  } = useBatchConversation(selectedPersona);
 
   const handlePersonaSelect = useCallback((persona: Persona) => {
     setSelectedPersona(persona);
@@ -165,7 +164,6 @@ export function ConversationPage({ personas }: ConversationPageProps) {
         </p>
       </div>
 
-      <audio ref={audioRef} playsInline className="hidden" />
     </main>
   );
 }
