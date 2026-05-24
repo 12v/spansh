@@ -12,6 +12,7 @@ export interface ConversationMessage {
 
 export function useBatchConversation(persona: Persona | null) {
   const [batchState, setBatchState] = useState<BatchState>("idle");
+  const [micReady, setMicReady] = useState(false);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [currentTranscript, setCurrentTranscript] = useState("");
@@ -43,6 +44,20 @@ export function useBatchConversation(persona: Persona | null) {
     }).catch(() => {});
   }, []);
 
+  // Call once when a persona is selected to prompt for mic permission before the
+  // first recording, so the permission dialog doesn't interrupt the user speaking.
+  const prepareMic = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((t) => t.stop());
+      setMicReady(true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "No se pudo acceder al micrófono";
+      setErrorMessage(msg);
+      setBatchState("error");
+    }
+  }, []);
+
   const startRecording = useCallback(async () => {
     if (!persona || batchState !== "idle") return;
     setErrorMessage(null);
@@ -65,6 +80,20 @@ export function useBatchConversation(persona: Persona | null) {
       setBatchState("error");
     }
   }, [persona, batchState]);
+
+  // Stop and discard the current recording without sending it to the server.
+  const cancelRecording = useCallback(() => {
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.ondataavailable = null;
+      recorder.stop();
+    }
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    recorderRef.current = null;
+    chunksRef.current = [];
+    setBatchState("idle");
+  }, []);
 
   const stopAndProcess = useCallback(async () => {
     const recorder = recorderRef.current;
@@ -163,9 +192,9 @@ export function useBatchConversation(persona: Persona | null) {
     recorderRef.current = null;
     chunksRef.current = [];
     nextStartTimeRef.current = 0;
-    // Close AudioContext so the next conversation starts fresh
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
+    setMicReady(false);
     setMessages([]);
     setCurrentTranscript("");
     setCurrentReply("");
@@ -175,11 +204,14 @@ export function useBatchConversation(persona: Persona | null) {
 
   return {
     batchState,
+    micReady,
     messages,
     errorMessage,
     currentTranscript,
     currentReply,
+    prepareMic,
     startRecording,
+    cancelRecording,
     stopAndProcess,
     reset,
   };

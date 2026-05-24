@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { Persona } from "@/lib/personas/types";
 import { useBatchConversation } from "@/lib/batch/useBatchConversation";
 import { PersonaSelector } from "./PersonaSelector";
 import { PushToTalkButton } from "./PushToTalkButton";
+
+const SHORT_HOLD_MS = 400;
 
 interface ConversationPageProps {
   personas: Persona[];
@@ -12,32 +14,63 @@ interface ConversationPageProps {
 
 export function ConversationPage({ personas }: ConversationPageProps) {
   const [selectedPersona, setSelectedPersona] = useState<Persona | null>(null);
+  const [showHoldHint, setShowHoldHint] = useState(false);
+  const holdHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pressStartRef = useRef(0);
 
   const {
     batchState,
+    micReady,
     messages,
     errorMessage,
     currentTranscript,
     currentReply,
+    prepareMic,
     startRecording,
+    cancelRecording,
     stopAndProcess,
     reset,
   } = useBatchConversation(selectedPersona);
 
-  const handlePersonaSelect = useCallback((persona: Persona) => {
-    setSelectedPersona(persona);
-  }, []);
+  const handlePersonaSelect = useCallback(
+    async (persona: Persona) => {
+      setSelectedPersona(persona);
+      await prepareMic();
+    },
+    [prepareMic]
+  );
 
   const handleReset = useCallback(() => {
     reset();
     setSelectedPersona(null);
+    setShowHoldHint(false);
   }, [reset]);
+
+  const handlePressStart = useCallback(() => {
+    pressStartRef.current = Date.now();
+    setShowHoldHint(false);
+    if (holdHintTimerRef.current) clearTimeout(holdHintTimerRef.current);
+    startRecording();
+  }, [startRecording]);
+
+  const handlePressEnd = useCallback(() => {
+    const held = Date.now() - pressStartRef.current;
+    if (held < SHORT_HOLD_MS) {
+      cancelRecording();
+      setShowHoldHint(true);
+      holdHintTimerRef.current = setTimeout(() => setShowHoldHint(false), 2500);
+    } else {
+      stopAndProcess();
+    }
+  }, [cancelRecording, stopAndProcess]);
 
   const isRecording = batchState === "recording";
   const isProcessing = batchState === "processing";
-  const isDisabled = batchState === "processing";
+  const isDisabled = isProcessing || !micReady;
 
-  const statusText = isRecording
+  const statusText = showHoldHint
+    ? "Mantén pulsado mientras hablas"
+    : isRecording
     ? "Grabando... suelta para enviar"
     : isProcessing
     ? currentTranscript
@@ -45,6 +78,8 @@ export function ConversationPage({ personas }: ConversationPageProps) {
       : "Transcribiendo..."
     : batchState === "error"
     ? ""
+    : !micReady
+    ? "Solicitando micrófono..."
     : messages.length === 0
     ? "Mantén pulsado para hablar"
     : "Mantén pulsado para responder";
@@ -129,12 +164,14 @@ export function ConversationPage({ personas }: ConversationPageProps) {
             {/* PTT Button */}
             <div className="flex flex-col items-center gap-4">
               <PushToTalkButton
-                onPressStart={startRecording}
-                onPressEnd={stopAndProcess}
+                onPressStart={handlePressStart}
+                onPressEnd={handlePressEnd}
                 disabled={isDisabled}
                 isRecording={isRecording}
               />
-              <p className="text-xs text-gray-500 select-none min-h-4">{statusText}</p>
+              <p className={`text-xs select-none min-h-4 transition-colors ${showHoldHint ? "text-amber-400 animate-pulse" : "text-gray-500"}`}>
+                {statusText}
+              </p>
             </div>
           </div>
         )}
