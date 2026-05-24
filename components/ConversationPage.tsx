@@ -2,11 +2,9 @@
 
 import { useCallback, useRef, useState } from "react";
 import type { Persona } from "@/lib/personas/types";
-import { useRealtimeConnection } from "@/lib/realtime/useRealtimeConnection";
-import { useAudioRecorder } from "@/lib/realtime/useAudioRecorder";
+import { useBatchConversation } from "@/lib/batch/useBatchConversation";
 import { PersonaSelector } from "./PersonaSelector";
 import { PushToTalkButton } from "./PushToTalkButton";
-import { ConnectionStatus } from "./ConnectionStatus";
 
 interface ConversationPageProps {
   personas: Persona[];
@@ -14,56 +12,39 @@ interface ConversationPageProps {
 
 export function ConversationPage({ personas }: ConversationPageProps) {
   const [selectedPersona, setSelectedPersona] = useState<Persona | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
 
-  const { state, connect, disconnect, replaceAudioTrack, triggerResponse } = useRealtimeConnection({
-    onTrack: (event) => {
-      if (audioRef.current && event.streams[0]) {
-        audioRef.current.srcObject = event.streams[0];
-      }
-    },
-    onError: (err) => {
-      setErrorMessage(err.message);
-    },
-    onStateChange: (s) => {
-      if (s !== "error") setErrorMessage(null);
-    },
-  });
+  const { batchState, messages, errorMessage, startRecording, stopAndProcess, reset } =
+    useBatchConversation(selectedPersona, audioRef);
 
-  const { isRecording, startRecording, stopRecording } = useAudioRecorder(
-    replaceAudioTrack,
-    {
-      onError: (err) => setErrorMessage(err.message),
-    }
-  );
-
-  const handleStopRecording = useCallback(() => {
-    stopRecording();
-    triggerResponse();
-  }, [stopRecording, triggerResponse]);
-
-  const handlePersonaSelect = useCallback(
-    async (persona: Persona) => {
-      setSelectedPersona(persona);
-      setErrorMessage(null);
-      await connect(persona.id);
-    },
-    [connect]
-  );
+  const handlePersonaSelect = useCallback((persona: Persona) => {
+    setSelectedPersona(persona);
+  }, []);
 
   const handleReset = useCallback(() => {
-    handleStopRecording();
-    disconnect();
+    reset();
     setSelectedPersona(null);
-    setErrorMessage(null);
     if (audioRef.current) {
-      audioRef.current.srcObject = null;
+      audioRef.current.src = "";
     }
-  }, [stopRecording, disconnect]);
+  }, [reset]);
 
-  const isConnected = state === "connected";
-  const isConnecting = state === "connecting";
+  const isRecording = batchState === "recording";
+  const isProcessing = batchState === "processing";
+  const isDisabled = batchState === "processing";
+
+  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+  const lastAssistantMsg = [...messages].reverse().find((m) => m.role === "assistant");
+
+  const statusText = isRecording
+    ? "Grabando... suelta para enviar"
+    : isProcessing
+    ? "Procesando..."
+    : batchState === "error"
+    ? ""
+    : messages.length === 0
+    ? "Mantén pulsado para hablar"
+    : "Mantén pulsado para responder";
 
   return (
     <main className="min-h-screen bg-gray-950 flex flex-col items-center justify-between px-4 py-8 sm:py-12">
@@ -86,39 +67,41 @@ export function ConversationPage({ personas }: ConversationPageProps) {
       {/* Main Content */}
       <div className="flex-1 flex flex-col items-center justify-center w-full py-8 gap-8">
         {!selectedPersona ? (
-          <PersonaSelector
-            personas={personas}
-            onSelect={handlePersonaSelect}
-            loading={isConnecting}
-          />
+          <PersonaSelector personas={personas} onSelect={handlePersonaSelect} loading={false} />
         ) : (
-          <div className="flex flex-col items-center gap-6">
-            {/* Selected persona info */}
+          <div className="flex flex-col items-center gap-6 w-full max-w-lg">
+            {/* Persona info */}
             <div className="text-center">
               <p className="text-gray-400 text-sm">Hablando con</p>
-              <p className="text-white font-semibold text-xl mt-1">
-                {selectedPersona.displayName}
-              </p>
+              <p className="text-white font-semibold text-xl mt-1">{selectedPersona.displayName}</p>
               <p className="text-gray-500 text-sm mt-1">{selectedPersona.accentRegion}</p>
             </div>
+
+            {/* Last exchange */}
+            {(lastUserMsg || lastAssistantMsg) && (
+              <div className="w-full flex flex-col gap-3">
+                {lastUserMsg && (
+                  <div className="self-end max-w-xs rounded-2xl bg-indigo-700 px-4 py-2.5 text-sm text-white">
+                    {lastUserMsg.content}
+                  </div>
+                )}
+                {lastAssistantMsg && (
+                  <div className="self-start max-w-xs rounded-2xl bg-gray-800 px-4 py-2.5 text-sm text-gray-100">
+                    {lastAssistantMsg.content}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* PTT Button */}
             <div className="flex flex-col items-center gap-4">
               <PushToTalkButton
                 onPressStart={startRecording}
-                onPressEnd={handleStopRecording}
-                disabled={!isConnected}
+                onPressEnd={stopAndProcess}
+                disabled={isDisabled}
                 isRecording={isRecording}
               />
-              <p className="text-xs text-gray-500 select-none">
-                {isRecording
-                  ? "Grabando... suelta para enviar"
-                  : isConnected
-                  ? "Mantén pulsado para hablar"
-                  : isConnecting
-                  ? "Conectando..."
-                  : ""}
-              </p>
+              <p className="text-xs text-gray-500 select-none min-h-4">{statusText}</p>
             </div>
           </div>
         )}
@@ -127,17 +110,26 @@ export function ConversationPage({ personas }: ConversationPageProps) {
         {errorMessage && (
           <div className="max-w-sm w-full rounded-lg border border-red-800 bg-red-950 px-4 py-3 text-sm text-red-300">
             {errorMessage}
+            {batchState === "error" && (
+              <button
+                onClick={() => reset()}
+                className="ml-3 underline text-red-400 hover:text-red-200"
+              >
+                Reintentar
+              </button>
+            )}
           </div>
         )}
       </div>
 
-      {/* Footer: connection status */}
+      {/* Footer */}
       <div className="w-full max-w-2xl flex justify-center">
-        <ConnectionStatus state={state} />
+        <p className="text-xs text-gray-600">
+          {messages.length > 0 ? `${Math.ceil(messages.length / 2)} intercambio${messages.length > 2 ? "s" : ""}` : ""}
+        </p>
       </div>
 
-      {/* Hidden audio element for AI responses — captions not applicable for live AI speech */}
-      <audio ref={audioRef} autoPlay playsInline className="hidden" />
+      <audio ref={audioRef} playsInline className="hidden" />
     </main>
   );
 }

@@ -1,19 +1,11 @@
-export type RealtimeVoice =
-  | "alloy"
-  | "ash"
-  | "ballad"
-  | "coral"
-  | "echo"
-  | "sage"
-  | "shimmer"
-  | "verse";
+export type TTSVoice = "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer";
 
 export interface Persona {
   id: string;
   displayName: string;
   description: string;
   systemPrompt: string;
-  voice: RealtimeVoice;
+  voice: TTSVoice;
   speakingStyle: string;
   accentRegion: string;
 }
