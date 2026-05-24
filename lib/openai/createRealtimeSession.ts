@@ -4,7 +4,7 @@ export interface RealtimeSessionConfig {
   model: string;
   voice: string;
   instructions: string;
-  turnDetection: null;
+  turn_detection: null;
 }
 
 export interface EphemeralSessionResponse {
