@@ -45,9 +45,6 @@ export async function POST(req: NextRequest) {
       const ttsModel: "tts-1" | "tts-1-hd" =
         rawTtsModel === "tts-1" || rawTtsModel === "tts-1-hd" ? rawTtsModel : "tts-1-hd";
 
-      const rawSpeed = parseFloat((formData.get("ttsSpeed") as string | null) ?? "1.0");
-      const ttsSpeed = isNaN(rawSpeed) ? 1.0 : Math.min(2.0, Math.max(0.5, rawSpeed));
-
       const rawGptModel = formData.get("gptModel") as string | null;
       const gptModel: "gpt-4o-mini" | "gpt-4o" =
         rawGptModel === "gpt-4o" ? "gpt-4o" : "gpt-4o-mini";
@@ -91,7 +88,6 @@ export async function POST(req: NextRequest) {
           voice: persona!.voice as TTSVoice,
           input: trimmed,
           response_format: "mp3",
-          speed: ttsSpeed,
         });
 
         // Collect TTS stream chunks and send as one audio_chunk event

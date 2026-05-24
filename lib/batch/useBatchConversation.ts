@@ -45,9 +45,11 @@ export function useBatchConversation(persona: Persona | null) {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef(0);
   const decodeChainRef = useRef<Promise<void>>(Promise.resolve());
+  const playbackRateRef = useRef(1.0);
 
   const scheduleAudioChunk = useCallback((base64: string) => {
     const ctx = (audioCtxRef.current ??= new AudioContext());
+    const rate = playbackRateRef.current;
     const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
     const buffer = bytes.buffer.slice(0);
     decodeChainRef.current = decodeChainRef.current.then(async () => {
@@ -55,10 +57,11 @@ export function useBatchConversation(persona: Persona | null) {
         const audioBuffer = await ctx.decodeAudioData(buffer);
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
+        source.playbackRate.value = rate;
         source.connect(ctx.destination);
         const startAt = Math.max(ctx.currentTime, nextStartTimeRef.current);
         source.start(startAt);
-        nextStartTimeRef.current = startAt + audioBuffer.duration;
+        nextStartTimeRef.current = startAt + audioBuffer.duration / rate;
       } catch {
         // ignore decode errors for individual chunks
       }
@@ -139,6 +142,7 @@ export function useBatchConversation(persona: Persona | null) {
   const stopAndProcess = useCallback(async (settings: Pick<Settings, "ttsModel" | "ttsSpeed" | "gptModel">) => {
     const recorder = recorderRef.current;
     if (!recorder || batchState !== "recording") return;
+    playbackRateRef.current = settings.ttsSpeed;
 
     // Capture the max RMS before stopping the analyser
     const peakRms = maxRmsRef.current;
@@ -178,7 +182,6 @@ export function useBatchConversation(persona: Persona | null) {
       formData.append("personaId", persona!.id);
       formData.append("history", JSON.stringify(messagesRef.current));
       formData.append("ttsModel", settings.ttsModel);
-      formData.append("ttsSpeed", String(settings.ttsSpeed));
       formData.append("gptModel", settings.gptModel);
 
       const res = await fetch("/api/process-speech", { method: "POST", body: formData });
