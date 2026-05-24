@@ -147,6 +147,8 @@ export function useBatchConversation(persona: Persona | null) {
     setBatchState("processing");
     setCurrentTranscript("");
     setCurrentReply("");
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
     nextStartTimeRef.current = 0;
     decodeChainRef.current = Promise.resolve();
 
