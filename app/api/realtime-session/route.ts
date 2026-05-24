@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
     }
 
     const session = await createRealtimeSession({
-      model: "gpt-4o-realtime-preview",
+      model: "gpt-realtime",
       voice: persona.voice,
       instructions: persona.systemPrompt,
     });

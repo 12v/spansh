@@ -3,7 +3,8 @@
 import { useCallback, useRef, useState } from "react";
 import type { ConnectionState, RealtimeConnectionOptions } from "./types";
 
-const REALTIME_SDP_URL = "https://api.openai.com/v1/realtime";
+const REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
+const REALTIME_MODEL = "gpt-realtime";
 
 export function useRealtimeConnection(options: RealtimeConnectionOptions = {}) {
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -54,7 +55,7 @@ export function useRealtimeConnection(options: RealtimeConnectionOptions = {}) {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
-        const sdpRes = await fetch(REALTIME_SDP_URL, {
+        const sdpRes = await fetch(`${REALTIME_CALLS_URL}?model=${REALTIME_MODEL}`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${token}`,
