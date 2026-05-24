@@ -4,7 +4,6 @@ export interface RealtimeSessionConfig {
   model: string;
   voice: string;
   instructions: string;
-  inputAudioTranscription?: { model: string };
   turnDetection: null;
 }
 

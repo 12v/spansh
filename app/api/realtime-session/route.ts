@@ -21,7 +21,6 @@ export async function POST(req: NextRequest) {
       model: "gpt-4o-realtime-preview",
       voice: persona.voice,
       instructions: persona.systemPrompt,
-      inputAudioTranscription: { model: "whisper-1" },
       turnDetection: null,
     });
 
