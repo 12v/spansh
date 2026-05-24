@@ -24,6 +24,20 @@ export function useBatchConversation(persona: Persona | null) {
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
+  // Silence detection: sample RMS every 50 ms while recording
+  const analyserCtxRef = useRef<AudioContext | null>(null);
+  const silenceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const maxRmsRef = useRef(0);
+
+  const stopSilenceDetection = useCallback(() => {
+    if (silenceIntervalRef.current !== null) {
+      clearInterval(silenceIntervalRef.current);
+      silenceIntervalRef.current = null;
+    }
+    analyserCtxRef.current?.close().catch(() => {});
+    analyserCtxRef.current = null;
+  }, []);
+
   // Web Audio API for gapless sentence-by-sentence playback
   const audioCtxRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef(0);
@@ -66,6 +80,23 @@ export function useBatchConversation(persona: Persona | null) {
         audio: { echoCancellation: true, noiseSuppression: true },
       });
       streamRef.current = stream;
+
+      // Wire up silence detection via AnalyserNode
+      maxRmsRef.current = 0;
+      const actx = new AudioContext();
+      analyserCtxRef.current = actx;
+      const analyser = actx.createAnalyser();
+      analyser.fftSize = 256;
+      actx.createMediaStreamSource(stream).connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+      silenceIntervalRef.current = setInterval(() => {
+        analyser.getFloatTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+        const rms = Math.sqrt(sum / buf.length);
+        if (rms > maxRmsRef.current) maxRmsRef.current = rms;
+      }, 50);
+
       const recorder = new MediaRecorder(stream);
       recorderRef.current = recorder;
       chunksRef.current = [];
@@ -83,6 +114,7 @@ export function useBatchConversation(persona: Persona | null) {
 
   // Stop and discard the current recording without sending it to the server.
   const cancelRecording = useCallback(() => {
+    stopSilenceDetection();
     const recorder = recorderRef.current;
     if (recorder && recorder.state !== "inactive") {
       recorder.ondataavailable = null;
@@ -93,11 +125,17 @@ export function useBatchConversation(persona: Persona | null) {
     recorderRef.current = null;
     chunksRef.current = [];
     setBatchState("idle");
-  }, []);
+  }, [stopSilenceDetection]);
+
+  const SILENCE_THRESHOLD = 0.01;
 
   const stopAndProcess = useCallback(async () => {
     const recorder = recorderRef.current;
     if (!recorder || batchState !== "recording") return;
+
+    // Capture the max RMS before stopping the analyser
+    const peakRms = maxRmsRef.current;
+    stopSilenceDetection();
 
     setBatchState("processing");
     setCurrentTranscript("");
@@ -112,6 +150,14 @@ export function useBatchConversation(persona: Persona | null) {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     recorderRef.current = null;
+
+    // Bail out early if no meaningful audio was detected
+    if (peakRms < SILENCE_THRESHOLD) {
+      chunksRef.current = [];
+      setErrorMessage("No se detectó audio. Intenta de nuevo.");
+      setBatchState("idle");
+      return;
+    }
 
     const mimeType = recorder.mimeType || "audio/webm";
     const ext = mimeType.includes("mp4") ? "mp4" : "webm";
@@ -187,6 +233,7 @@ export function useBatchConversation(persona: Persona | null) {
   }, [persona, batchState, scheduleAudioChunk]);
 
   const reset = useCallback(() => {
+    stopSilenceDetection();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     recorderRef.current = null;

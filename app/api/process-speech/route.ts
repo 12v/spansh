@@ -12,21 +12,6 @@ type HistoryMessage = { role: "user" | "assistant"; content: string };
 // Sentence boundary: punctuation optionally followed by closing quotes/parens, then whitespace
 const SENTENCE_END = /[.!?]['")\]]*\s/;
 
-// Whisper hallucinates these phrases when given silence or near-silence
-const WHISPER_HALLUCINATIONS = [
-  "amara.org",
-  "subtítulos realizados",
-  "subtitles by",
-  "gracias por ver",
-  "thank you for watching",
-  "transcribed by",
-  "www.",
-];
-
-function isHallucination(text: string): boolean {
-  const lower = text.toLowerCase();
-  return WHISPER_HALLUCINATIONS.some((h) => lower.includes(h));
-}
 
 function sseEvent(data: object): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
@@ -64,7 +49,7 @@ export async function POST(req: NextRequest) {
       });
       const transcript = transcription.text.trim();
 
-      if (!transcript || isHallucination(transcript)) {
+      if (!transcript) {
         await writer.write(sseEvent({ type: "error", message: "No se detectó audio. Intenta de nuevo." }));
         return;
       }
