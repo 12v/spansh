@@ -17,7 +17,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
 
-  const { state, connect, disconnect, replaceAudioTrack } = useRealtimeConnection({
+  const { state, connect, disconnect, replaceAudioTrack, triggerResponse } = useRealtimeConnection({
     onTrack: (event) => {
       if (audioRef.current && event.streams[0]) {
         audioRef.current.srcObject = event.streams[0];
@@ -38,6 +38,11 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     }
   );
 
+  const handleStopRecording = useCallback(() => {
+    stopRecording();
+    triggerResponse();
+  }, [stopRecording, triggerResponse]);
+
   const handlePersonaSelect = useCallback(
     async (persona: Persona) => {
       setSelectedPersona(persona);
@@ -48,7 +53,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
   );
 
   const handleReset = useCallback(() => {
-    stopRecording();
+    handleStopRecording();
     disconnect();
     setSelectedPersona(null);
     setErrorMessage(null);
@@ -101,7 +106,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
             <div className="flex flex-col items-center gap-4">
               <PushToTalkButton
                 onPressStart={startRecording}
-                onPressEnd={stopRecording}
+                onPressEnd={handleStopRecording}
                 disabled={!isConnected}
                 isRecording={isRecording}
               />

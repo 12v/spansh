@@ -3,11 +3,12 @@
 import { useCallback, useRef, useState } from "react";
 import type { ConnectionState, RealtimeConnectionOptions } from "./types";
 
-const REALTIME_MODEL = "gpt-4o-realtime-preview";
+const REALTIME_SDP_URL = "https://api.openai.com/v1/realtime";
 
 export function useRealtimeConnection(options: RealtimeConnectionOptions = {}) {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const transceiverRef = useRef<RTCRtpTransceiver | null>(null);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
   const [state, setState] = useState<ConnectionState>("idle");
   const optionsRef = useRef(options);
   optionsRef.current = options;
@@ -40,6 +41,10 @@ export function useRealtimeConnection(options: RealtimeConnectionOptions = {}) {
           optionsRef.current.onTrack?.(event);
         };
 
+        // Data channel for sending client events (e.g. response.create after PTT)
+        const dc = pc.createDataChannel("oai-events", { ordered: true });
+        dataChannelRef.current = dc;
+
         // Add sendonly transceiver — actual mic track swapped in on PTT press
         const transceiver = pc.addTransceiver("audio", {
           direction: "sendonly",
@@ -49,20 +54,18 @@ export function useRealtimeConnection(options: RealtimeConnectionOptions = {}) {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
-        const sdpRes = await fetch(
-          `https://api.openai.com/v1/realtime?model=${REALTIME_MODEL}`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/sdp",
-            },
-            body: offer.sdp,
-          }
-        );
+        const sdpRes = await fetch(REALTIME_SDP_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/sdp",
+          },
+          body: offer.sdp,
+        });
 
         if (!sdpRes.ok) {
-          throw new Error(`WebRTC SDP exchange failed: ${sdpRes.status}`);
+          const errText = await sdpRes.text().catch(() => "");
+          throw new Error(`WebRTC SDP exchange failed: ${sdpRes.status}${errText ? ` — ${errText}` : ""}`);
         }
 
         const answerSdp = await sdpRes.text();
@@ -79,6 +82,8 @@ export function useRealtimeConnection(options: RealtimeConnectionOptions = {}) {
   );
 
   const disconnect = useCallback(() => {
+    dataChannelRef.current?.close();
+    dataChannelRef.current = null;
     pcRef.current?.close();
     pcRef.current = null;
     transceiverRef.current = null;
@@ -94,5 +99,12 @@ export function useRealtimeConnection(options: RealtimeConnectionOptions = {}) {
     []
   );
 
-  return { state, connect, disconnect, replaceAudioTrack };
+  // Called after PTT release — tells the model to generate a response
+  const triggerResponse = useCallback(() => {
+    const dc = dataChannelRef.current;
+    if (!dc || dc.readyState !== "open") return;
+    dc.send(JSON.stringify({ type: "response.create" }));
+  }, []);
+
+  return { state, connect, disconnect, replaceAudioTrack, triggerResponse };
 }
