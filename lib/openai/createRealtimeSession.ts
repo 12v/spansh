@@ -1,37 +1,38 @@
 import "server-only";
 
-export interface RealtimeSessionConfig {
+export interface EphemeralClientSecretResponse {
+  value: string;
+  expires_at: number;
+}
+
+export async function createRealtimeSession(config: {
   model: string;
   voice: string;
   instructions: string;
-  turn_detection: null;
-}
-
-export interface EphemeralSessionResponse {
-  id: string;
-  client_secret: {
-    value: string;
-    expires_at: number;
-  };
-  model: string;
-  voice: string;
-}
-
-export async function createRealtimeSession(
-  config: RealtimeSessionConfig
-): Promise<EphemeralSessionResponse> {
+}): Promise<EphemeralClientSecretResponse> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is not set");
   }
 
-  const response = await fetch("https://api.openai.com/v1/realtime/sessions", {
+  const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(config),
+    body: JSON.stringify({
+      expires_after: { anchor: "created_at", seconds: 60 },
+      session: {
+        type: "realtime",
+        model: config.model,
+        instructions: config.instructions,
+        audio: {
+          output: { voice: config.voice },
+          input: { turn_detection: null },
+        },
+      },
+    }),
   });
 
   if (!response.ok) {
@@ -39,5 +40,9 @@ export async function createRealtimeSession(
     throw new Error(`OpenAI sessions API error ${response.status}: ${error}`);
   }
 
-  return response.json() as Promise<EphemeralSessionResponse>;
+  const data = await response.json();
+  return {
+    value: data.value,
+    expires_at: data.expires_at,
+  };
 }

@@ -21,12 +21,11 @@ export async function POST(req: NextRequest) {
       model: "gpt-4o-realtime-preview",
       voice: persona.voice,
       instructions: persona.systemPrompt,
-      turn_detection: null,
     });
 
     return NextResponse.json({
-      token: session.client_secret.value,
-      expiresAt: session.client_secret.expires_at,
+      token: session.value,
+      expiresAt: session.expires_at,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
