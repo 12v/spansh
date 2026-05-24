@@ -72,6 +72,16 @@ export function useRealtimeConnection(options: RealtimeConnectionOptions = {}) {
         const answerSdp = await sdpRes.text();
         await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
 
+        // Wait for data channel to be open before signalling ready — it opens
+        // asynchronously after ICE/DTLS completes, which takes a moment after
+        // setRemoteDescription returns.
+        await new Promise<void>((resolve, reject) => {
+          if (dc.readyState === "open") { resolve(); return; }
+          dc.addEventListener("open", () => resolve(), { once: true });
+          dc.addEventListener("error", () => reject(new Error("Data channel failed to open")), { once: true });
+          setTimeout(() => reject(new Error("Data channel open timeout")), 15000);
+        });
+
         updateState("connected");
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
@@ -100,10 +110,11 @@ export function useRealtimeConnection(options: RealtimeConnectionOptions = {}) {
     []
   );
 
-  // Called after PTT release — tells the model to generate a response
+  // Called after PTT release — commits the audio buffer then requests a response
   const triggerResponse = useCallback(() => {
     const dc = dataChannelRef.current;
     if (!dc || dc.readyState !== "open") return;
+    dc.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
     dc.send(JSON.stringify({ type: "response.create" }));
   }, []);
 
