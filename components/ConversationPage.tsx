@@ -138,7 +138,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
             <div className="text-center">
               <p className="text-gray-400 text-sm">Hablando con</p>
               <p className="text-white font-semibold text-xl mt-1">{selectedPersona.displayName}</p>
-              <p className="text-gray-500 text-sm mt-1">{selectedPersona.accentRegion}</p>
+              <p className="text-gray-500 text-sm mt-1">{selectedPersona.speakingStyle} · {selectedPersona.accentRegion}</p>
             </div>
 
             {/* Conversation history */}
