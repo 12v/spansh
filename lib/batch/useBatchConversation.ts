@@ -38,24 +38,30 @@ export function useBatchConversation(persona: Persona | null) {
     analyserCtxRef.current = null;
   }, []);
 
-  // Web Audio API for gapless sentence-by-sentence playback
+  // Web Audio API for gapless sentence-by-sentence playback.
+  // decodeChain serialises decoding so chunks always play in arrival order,
+  // regardless of how fast each individual decode completes.
   const audioCtxRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef(0);
+  const decodeChainRef = useRef<Promise<void>>(Promise.resolve());
 
   const scheduleAudioChunk = useCallback((base64: string) => {
     const ctx = (audioCtxRef.current ??= new AudioContext());
     const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-    // decodeAudioData consumes the buffer, so we need a copy
     const buffer = bytes.buffer.slice(0);
-    ctx.decodeAudioData(buffer).then((audioBuffer) => {
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-      // Schedule immediately after the previous chunk ends
-      const startAt = Math.max(ctx.currentTime, nextStartTimeRef.current);
-      source.start(startAt);
-      nextStartTimeRef.current = startAt + audioBuffer.duration;
-    }).catch(() => {});
+    decodeChainRef.current = decodeChainRef.current.then(async () => {
+      try {
+        const audioBuffer = await ctx.decodeAudioData(buffer);
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(ctx.destination);
+        const startAt = Math.max(ctx.currentTime, nextStartTimeRef.current);
+        source.start(startAt);
+        nextStartTimeRef.current = startAt + audioBuffer.duration;
+      } catch {
+        // ignore decode errors for individual chunks
+      }
+    });
   }, []);
 
   // Call once when a persona is selected to prompt for mic permission before the
@@ -141,6 +147,7 @@ export function useBatchConversation(persona: Persona | null) {
     setCurrentTranscript("");
     setCurrentReply("");
     nextStartTimeRef.current = 0;
+    decodeChainRef.current = Promise.resolve();
 
     await new Promise<void>((resolve) => {
       recorder.onstop = () => resolve();
@@ -239,6 +246,7 @@ export function useBatchConversation(persona: Persona | null) {
     recorderRef.current = null;
     chunksRef.current = [];
     nextStartTimeRef.current = 0;
+    decodeChainRef.current = Promise.resolve();
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
     setMicReady(false);
