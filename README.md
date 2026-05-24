@@ -23,10 +23,19 @@ Open [http://localhost:3000](http://localhost:3000).
 ## Architecture
 
 - **Frontend**: Next.js 15, TypeScript, Tailwind CSS v4
-- **Voice AI**: OpenAI Realtime API via WebRTC
 - **Backend**: Next.js Route Handlers only (no separate server)
+- **Pipeline**: Whisper (transcription) → GPT-4o-mini (response) → TTS-1 (speech)
 
-The browser fetches an ephemeral token from `/api/realtime-session`, then connects directly to the OpenAI Realtime API via WebRTC. Audio is never proxied through the backend.
+### How it works
+
+1. Hold the mic button to record
+2. Release to send — audio is uploaded to `/api/process-speech`
+3. The server streams results back via Server-Sent Events (SSE):
+   - Whisper transcribes the audio → transcript appears immediately
+   - GPT-4o-mini streams the reply → text appears token by token
+   - As each sentence completes, TTS-1 generates audio → plays without waiting for the full reply
+
+Audio is never stored. The OpenAI API key stays server-side.
 
 ## Personas
 
