@@ -344,8 +344,6 @@ export function useBatchConversation(
   }, [persona, stopVad]);
 
   // Internal: start recording a new turn using the existing session stream.
-  // VAD is driven by MediaRecorder ondataavailable (timeslice mode) — avoids
-  // Web Audio API / AnalyserNode which returns zeros on iOS Safari (WebKit bug #225564).
   const startRecordingTurn = useCallback(() => {
     if (!conversationActiveRef.current || !sessionStreamRef.current || batchState !== "idle") return;
 
