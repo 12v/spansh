@@ -13,11 +13,12 @@ export interface ConversationMessage {
 
 const MSE_MIME = 'audio/ogg; codecs="opus"';
 
-// VAD via MediaRecorder timeslice: all codecs (AAC on iOS, Opus on desktop) produce
-// dramatically larger packets for speech than silence. 100ms at typical bitrates:
-//   silence → ~10–50 bytes, speech → ~300–1500 bytes
-const TIMESLICE_MS = 100;
-const SPEECH_SIZE_THRESHOLD = 100; // bytes per timeslice
+// VAD via ScriptProcessorNode.onaudioprocess — receives PCM frames directly from the
+// audio rendering pipeline. Works on iOS Safari where getFloatTimeDomainData returns
+// zeros for MediaStreamSourceNode (WebKit bug #225564) and where MediaRecorder timeslice
+// is ignored (ondataavailable only fires on stop).
+const SPEECH_THRESHOLD = 0.02;
+const SILENCE_THRESHOLD = 0.01;
 const END_OF_SPEECH_MS = 1500;
 
 function mseSupported(): boolean {
@@ -53,7 +54,9 @@ export function useBatchConversation(
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
-  // VAD state — driven by MediaRecorder ondataavailable (no Web Audio needed)
+  // VAD state — driven by ScriptProcessorNode.onaudioprocess
+  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const speechDetectedRef = useRef(false);
   const silenceSinceRef = useRef<number | null>(null);
   const vadActiveRef = useRef(false); // false prevents re-entrancy once auto-stop fires
@@ -88,6 +91,10 @@ export function useBatchConversation(
     vadActiveRef.current = false;
     speechDetectedRef.current = false;
     silenceSinceRef.current = null;
+    scriptProcessorRef.current?.disconnect();
+    scriptProcessorRef.current = null;
+    micSourceRef.current?.disconnect();
+    micSourceRef.current = null;
   }, []);
 
   // Call once when a persona is selected to prompt for mic permission before the
@@ -350,23 +357,36 @@ export function useBatchConversation(
     setSpeechDetected(false);
     setErrorMessage(null);
 
-    const recorder = new MediaRecorder(stream);
-    recorderRef.current = recorder;
-    chunksRef.current = [];
+    // ScriptProcessorNode receives PCM frames directly from the audio rendering pipeline.
+    // iOS Safari ignores MediaRecorder timeslice AND has a bug where getFloatTimeDomainData
+    // returns zeros for MediaStreamSourceNode — onaudioprocess is unaffected by both.
+    const ctx = audioCtxRef.current;
+    if (!ctx) return;
+    const scriptProcessor = ctx.createScriptProcessor(2048, 1, 1);
+    const micSource = ctx.createMediaStreamSource(stream);
+    // silentGain(0) → destination: iOS WebKit won't process nodes without a destination path
+    const silentGain = ctx.createGain();
+    silentGain.gain.value = 0;
+    micSource.connect(scriptProcessor);
+    scriptProcessor.connect(silentGain);
+    silentGain.connect(ctx.destination);
+    scriptProcessorRef.current = scriptProcessor;
+    micSourceRef.current = micSource;
 
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunksRef.current.push(e.data);
+    scriptProcessor.onaudioprocess = (event) => {
       if (!vadActiveRef.current) return;
+      const input = event.inputBuffer.getChannelData(0);
+      let sum = 0;
+      for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+      const rms = Math.sqrt(sum / input.length);
 
-      const isSpeech = e.data.size > SPEECH_SIZE_THRESHOLD;
-
-      if (isSpeech) {
+      if (rms >= SPEECH_THRESHOLD) {
         if (!speechDetectedRef.current) {
           speechDetectedRef.current = true;
           setSpeechDetected(true);
         }
         silenceSinceRef.current = null;
-      } else if (speechDetectedRef.current) {
+      } else if (rms < SILENCE_THRESHOLD && speechDetectedRef.current) {
         if (silenceSinceRef.current === null) {
           silenceSinceRef.current = Date.now();
         } else if (Date.now() - silenceSinceRef.current >= END_OF_SPEECH_MS) {
@@ -375,7 +395,13 @@ export function useBatchConversation(
       }
     };
 
-    recorder.start(TIMESLICE_MS);
+    const recorder = new MediaRecorder(stream);
+    recorderRef.current = recorder;
+    chunksRef.current = [];
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunksRef.current.push(e.data);
+    };
+    recorder.start();
     setBatchState("recording");
   }, [batchState, stopAndProcessInternal]);
 
