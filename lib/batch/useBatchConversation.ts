@@ -87,6 +87,9 @@ export function useBatchConversation(
   const pcmLeftoverRef = useRef<number | null>(null);
   const nextStartTimeRef = useRef(0);
 
+  // Screen wake lock — acquired for the duration of an active conversation
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+
   const stopVad = useCallback(() => {
     vadActiveRef.current = false;
     speechDetectedRef.current = false;
@@ -118,6 +121,8 @@ export function useBatchConversation(
 
     const hadSpeech = speechDetectedRef.current;
     stopVad();
+    // Mute mic tracks during processing/playback so iOS doesn't duck the AI audio
+    sessionStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = false; });
 
     setBatchState("processing");
     setCurrentTranscript("");
@@ -354,6 +359,8 @@ export function useBatchConversation(
     vadActiveRef.current = true;
     setSpeechDetected(false);
     setErrorMessage(null);
+    // Re-enable mic tracks for this recording turn (were muted during processing/playback)
+    sessionStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = true; });
 
     // ScriptProcessorNode receives PCM frames directly from the audio rendering pipeline.
     // iOS Safari ignores MediaRecorder timeslice AND has a bug where getFloatTimeDomainData
@@ -431,6 +438,9 @@ export function useBatchConversation(
 
       conversationActiveRef.current = true;
       setConversationActive(true);
+      navigator.wakeLock?.request('screen').then(lock => {
+        wakeLockRef.current = lock;
+      }).catch(() => {});
     } catch (err) {
       audioCtxRef.current?.close().catch(() => {});
       audioCtxRef.current = null;
@@ -443,6 +453,9 @@ export function useBatchConversation(
   const stopConversation = useCallback(() => {
     conversationActiveRef.current = false;
     setConversationActive(false);
+
+    wakeLockRef.current?.release().catch(() => {});
+    wakeLockRef.current = null;
 
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
@@ -544,9 +557,25 @@ export function useBatchConversation(
     };
   }, [batchState]);
 
+  // Re-acquire wake lock when the page becomes visible again (OS releases it on page hide)
+  useEffect(() => {
+    const reacquire = () => {
+      if (document.visibilityState === 'visible' && conversationActiveRef.current) {
+        navigator.wakeLock?.request('screen').then(lock => {
+          wakeLockRef.current = lock;
+        }).catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', reacquire);
+    return () => document.removeEventListener('visibilitychange', reacquire);
+  }, []);
+
   const reset = useCallback(() => {
     conversationActiveRef.current = false;
     setConversationActive(false);
+
+    wakeLockRef.current?.release().catch(() => {});
+    wakeLockRef.current = null;
 
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
