@@ -31,6 +31,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     errorMessage,
     currentTranscript,
     currentReply,
+    playbackVolume,
     prepareMic,
     startRecording,
     cancelRecording,
@@ -72,7 +73,8 @@ export function ConversationPage({ personas }: ConversationPageProps) {
 
   const isRecording = batchState === "recording";
   const isProcessing = batchState === "processing";
-  const isDisabled = isProcessing || !micReady;
+  const isPlaying = batchState === "playing";
+  const isDisabled = isProcessing || isPlaying || !micReady;
 
   const statusText = showHoldHint
     ? "Mantén pulsado mientras hablas"
@@ -82,6 +84,8 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     ? currentTranscript
       ? "Respondiendo..."
       : "Transcribiendo..."
+    : isPlaying
+    ? "Escuchando..."
     : batchState === "error"
     ? ""
     : !micReady
@@ -193,6 +197,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
                 onPressEnd={handlePressEnd}
                 disabled={isDisabled}
                 isRecording={isRecording}
+                playbackVolume={playbackVolume}
               />
               <p className={`text-xs select-none min-h-4 transition-colors ${showHoldHint ? "text-amber-400 animate-pulse" : "text-gray-500"}`}>
                 {statusText}
