@@ -34,7 +34,7 @@ export function PushToTalkButton({
         e.preventDefault();
         onPressEnd();
       }}
-      style={{ touchAction: "none", userSelect: "none" }}
+      style={{ touchAction: "none", userSelect: "none", WebkitUserSelect: "none", WebkitTouchCallout: "none" } as React.CSSProperties}
       className={cn(
         "relative flex items-center justify-center",
         "w-24 h-24 rounded-full",
