@@ -48,6 +48,7 @@ export function useBatchConversation(persona: Persona | null) {
 
   const scheduleAudioChunk = useCallback((base64: string) => {
     const ctx = (audioCtxRef.current ??= new AudioContext());
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
     const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
     const buffer = bytes.buffer.slice(0);
     decodeChainRef.current = decodeChainRef.current.then(async () => {
@@ -148,7 +149,8 @@ export function useBatchConversation(persona: Persona | null) {
     setCurrentTranscript("");
     setCurrentReply("");
     audioCtxRef.current?.close().catch(() => {});
-    audioCtxRef.current = null;
+    audioCtxRef.current = new AudioContext();
+    audioCtxRef.current.resume().catch(() => {});
     nextStartTimeRef.current = 0;
     decodeChainRef.current = Promise.resolve();
 
