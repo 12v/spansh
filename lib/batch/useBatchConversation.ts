@@ -50,8 +50,9 @@ export function useBatchConversation(
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
-  // Silence/VAD detection during recording
-  const analyserCtxRef = useRef<AudioContext | null>(null);
+  // Silence/VAD detection during recording (reuses session audioCtxRef — no separate context needed)
+  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const micAnalyserRef = useRef<AnalyserNode | null>(null);
   const silenceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const maxRmsRef = useRef(0);
   const speechDetectedRef = useRef(false);
@@ -88,8 +89,10 @@ export function useBatchConversation(
       clearInterval(silenceIntervalRef.current);
       silenceIntervalRef.current = null;
     }
-    analyserCtxRef.current?.close().catch(() => {});
-    analyserCtxRef.current = null;
+    micSourceRef.current?.disconnect();
+    micSourceRef.current = null;
+    micAnalyserRef.current?.disconnect();
+    micAnalyserRef.current = null;
     speechDetectedRef.current = false;
     silenceSinceRef.current = null;
   }, []);
@@ -357,11 +360,17 @@ export function useBatchConversation(
     setSpeechDetected(false);
     setErrorMessage(null);
 
-    const actx = new AudioContext();
-    analyserCtxRef.current = actx;
-    const analyser = actx.createAnalyser();
+    // Reuse the session-scoped AudioContext (already resumed in startConversation gesture).
+    // Creating a new AudioContext here would be suspended on iOS Safari since this runs
+    // inside a setTimeout callback, not a user gesture.
+    const ctx = audioCtxRef.current;
+    if (!ctx) return;
+    const analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
-    actx.createMediaStreamSource(stream).connect(analyser);
+    const micSource = ctx.createMediaStreamSource(stream);
+    micSource.connect(analyser);
+    micSourceRef.current = micSource;
+    micAnalyserRef.current = analyser;
     const buf = new Float32Array(analyser.fftSize);
 
     silenceIntervalRef.current = setInterval(() => {
@@ -542,9 +551,7 @@ export function useBatchConversation(
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
 
-    stopSilenceDetection();
-    speechDetectedRef.current = false;
-    silenceSinceRef.current = null;
+    stopSilenceDetection(); // clears interval + disconnects micSourceRef/micAnalyserRef
 
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
