@@ -47,6 +47,9 @@ export async function POST(req: NextRequest) {
       const gptModel: "gpt-4o-mini" | "gpt-4o" =
         rawGptModel === "gpt-4o" ? "gpt-4o" : "gpt-4o-mini";
 
+      const audioFormat: "opus" | "pcm" =
+        formData.get("audioFormat") === "pcm" ? "pcm" : "opus";
+
       // Step 1: Whisper (needs complete file)
       const transcription = await openai.audio.transcriptions.create({
         file: audio,
@@ -88,7 +91,7 @@ export async function POST(req: NextRequest) {
           model: ttsModel,
           voice: persona.voice as TTSVoice,
           input: replyText,
-          response_format: "opus",
+          response_format: audioFormat,
           ...(ttsModel === "gpt-4o-mini-tts" && { instructions: persona.voiceInstructions }),
         });
 

@@ -66,8 +66,8 @@ export function useBatchConversation(persona: Persona | null) {
   const endOfStreamPendingRef = useRef(false);
   const drainFnRef = useRef<(() => void) | null>(null);
 
-  // Fallback-specific refs
-  const fallbackBytesRef = useRef<Uint8Array[]>([]);
+  // PCM fallback refs (Safari: stream 24kHz 16-bit mono PCM, schedule synchronously)
+  const pcmLeftoverRef = useRef<number | null>(null); // orphaned byte at chunk boundary
   const nextStartTimeRef = useRef(0);
 
   // Call once when a persona is selected to prompt for mic permission before the
@@ -188,7 +188,7 @@ export function useBatchConversation(persona: Persona | null) {
       endOfStreamPendingRef.current = false;
     } else {
       analyserRef.current.connect(audioCtxRef.current.destination);
-      fallbackBytesRef.current = [];
+      pcmLeftoverRef.current = null;
       nextStartTimeRef.current = 0;
     }
 
@@ -247,6 +247,7 @@ export function useBatchConversation(persona: Persona | null) {
       formData.append("history", JSON.stringify(messagesRef.current));
       formData.append("ttsModel", settings.ttsModel);
       formData.append("gptModel", settings.gptModel);
+      formData.append("audioFormat", useMse ? "opus" : "pcm");
 
       const res = await fetch("/api/process-speech", { method: "POST", body: formData });
 
@@ -287,13 +288,42 @@ export function useBatchConversation(persona: Persona | null) {
 
             case "audio_chunk": {
               const raw = atob(data.data);
-              const bytes = new Uint8Array(raw.length);
-              for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
               if (useMse) {
+                const bytes = new Uint8Array(raw.length);
+                for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
                 pendingChunksRef.current.push(bytes.buffer as ArrayBuffer);
                 drainFnRef.current?.();
               } else {
-                fallbackBytesRef.current.push(bytes);
+                // PCM path: 24 kHz, 16-bit signed little-endian, mono.
+                // Prepend any orphaned byte from the previous chunk, save one if this chunk is odd.
+                let pcm = raw;
+                if (pcmLeftoverRef.current !== null) {
+                  pcm = String.fromCharCode(pcmLeftoverRef.current) + pcm;
+                  pcmLeftoverRef.current = null;
+                }
+                if (pcm.length % 2 !== 0) {
+                  pcmLeftoverRef.current = pcm.charCodeAt(pcm.length - 1);
+                  pcm = pcm.slice(0, -1);
+                }
+                const sampleCount = pcm.length / 2;
+                if (sampleCount > 0) {
+                  const ctx = audioCtxRef.current!;
+                  const audioBuffer = ctx.createBuffer(1, sampleCount, 24000);
+                  const ch = audioBuffer.getChannelData(0);
+                  for (let i = 0; i < sampleCount; i++) {
+                    const lo = pcm.charCodeAt(i * 2);
+                    const hi = pcm.charCodeAt(i * 2 + 1);
+                    let s = (hi << 8) | lo;
+                    if (s >= 0x8000) s -= 0x10000;
+                    ch[i] = s / 32768;
+                  }
+                  const source = ctx.createBufferSource();
+                  source.buffer = audioBuffer;
+                  source.connect(analyserRef.current ?? ctx.destination);
+                  const startAt = Math.max(ctx.currentTime, nextStartTimeRef.current);
+                  source.start(startAt);
+                  nextStartTimeRef.current = startAt + audioBuffer.duration;
+                }
               }
               break;
             }
@@ -314,30 +344,9 @@ export function useBatchConversation(persona: Persona | null) {
                 drainFnRef.current?.();
                 setBatchState("playing");
               } else {
-                // Fallback: decode the full accumulated Opus file at once
+                // PCM: all chunks already scheduled; check if audio is still ahead
                 const ctx = audioCtxRef.current;
-                const parts = fallbackBytesRef.current;
-                fallbackBytesRef.current = [];
-                if (ctx && parts.length > 0) {
-                  const total = parts.reduce((n, p) => n + p.length, 0);
-                  const merged = new Uint8Array(new ArrayBuffer(total));
-                  let offset = 0;
-                  for (const p of parts) { merged.set(p, offset); offset += p.length; }
-                  try {
-                    const audioBuffer = await ctx.decodeAudioData(merged.buffer as ArrayBuffer);
-                    const source = ctx.createBufferSource();
-                    source.buffer = audioBuffer;
-                    source.connect(analyserRef.current ?? ctx.destination);
-                    const startAt = ctx.currentTime;
-                    source.start(startAt);
-                    nextStartTimeRef.current = startAt + audioBuffer.duration;
-                    setBatchState("playing");
-                  } catch {
-                    setBatchState("idle");
-                  }
-                } else {
-                  setBatchState("idle");
-                }
+                setBatchState(ctx && nextStartTimeRef.current > ctx.currentTime ? "playing" : "idle");
               }
               break;
             }
@@ -429,7 +438,7 @@ export function useBatchConversation(persona: Persona | null) {
     audioElRef.current = null;
     objectUrlRef.current = null;
     pendingChunksRef.current = [];
-    fallbackBytesRef.current = [];
+    pcmLeftoverRef.current = null;
     endOfStreamPendingRef.current = false;
     drainFnRef.current = null;
     useMseRef.current = false;
