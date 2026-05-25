@@ -9,10 +9,6 @@ const openai = new OpenAI();
 
 type HistoryMessage = { role: "user" | "assistant"; content: string };
 
-// Sentence boundary: punctuation optionally followed by closing quotes/parens, then whitespace
-const SENTENCE_END = /[.!?]['")\]]*\s/;
-
-
 function sseEvent(data: object): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
 }
@@ -51,6 +47,9 @@ export async function POST(req: NextRequest) {
       const gptModel: "gpt-4o-mini" | "gpt-4o" =
         rawGptModel === "gpt-4o" ? "gpt-4o" : "gpt-4o-mini";
 
+      const audioFormat: "opus" | "pcm" =
+        formData.get("audioFormat") === "pcm" ? "pcm" : "opus";
+
       // Step 1: Whisper (needs complete file)
       const transcription = await openai.audio.transcriptions.create({
         file: audio,
@@ -66,7 +65,7 @@ export async function POST(req: NextRequest) {
 
       await writer.write(sseEvent({ type: "transcript", text: transcript }));
 
-      // Step 2: GPT streaming → sentence-chunked TTS
+      // Step 2: GPT streaming — send text deltas immediately, accumulate full reply
       const completion = await openai.chat.completions.create({
         model: gptModel,
         messages: [
@@ -77,71 +76,37 @@ export async function POST(req: NextRequest) {
         stream: true,
       });
 
-      let sentenceBuffer = "";
       let fullReply = "";
-
-      async function ttsAndStream(text: string) {
-        const trimmed = text.trim();
-        if (!trimmed) return;
-        fullReply += (fullReply ? " " : "") + trimmed;
-
-        const ttsRes = await openai.audio.speech.create({
-          model: ttsModel,
-          voice: persona!.voice as TTSVoice,
-          input: trimmed,
-          response_format: "mp3",
-          ...(ttsModel === "gpt-4o-mini-tts" && { instructions: persona!.voiceInstructions }),
-        });
-
-        // Collect TTS stream chunks and send as one audio_chunk event
-        const reader = ttsRes.body!.getReader();
-        const parts: Uint8Array[] = [];
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) parts.push(value);
-        }
-        const merged = Buffer.concat(parts);
-        await writer.write(sseEvent({ type: "audio_chunk", data: merged.toString("base64") }));
-      }
-
-      // TTS runs in a separate promise chain so it never blocks GPT text streaming.
-      // Each sentence is chained onto the previous to maintain playback order.
-      let ttsChain = Promise.resolve();
-      let ttsError: Error | null = null;
-
-      function scheduleTts(sentence: string) {
-        ttsChain = ttsChain.then(async () => {
-          if (ttsError) return; // stop chain after first error
-          try {
-            await ttsAndStream(sentence);
-          } catch (err) {
-            ttsError = err instanceof Error ? err : new Error(String(err));
-          }
-        });
-      }
-
       for await (const chunk of completion) {
         const delta = chunk.choices[0]?.delta?.content ?? "";
         if (!delta) continue;
-
-        // Text flows to client without waiting for TTS
         await writer.write(sseEvent({ type: "text_delta", text: delta }));
-        sentenceBuffer += delta;
-
-        let match: RegExpExecArray | null;
-        while ((match = SENTENCE_END.exec(sentenceBuffer)) !== null) {
-          const cutAt = match.index + match[0].length - 1;
-          const sentence = sentenceBuffer.slice(0, cutAt);
-          sentenceBuffer = sentenceBuffer.slice(cutAt).trimStart();
-          scheduleTts(sentence);
-        }
+        fullReply += delta;
       }
 
-      // Schedule TTS for any remaining text, then wait for all TTS to finish
-      scheduleTts(sentenceBuffer);
-      await ttsChain;
-      if (ttsError) throw ttsError;
+      // Step 3: Single Opus TTS call — stream bytes as they arrive from OpenAI
+      const replyText = fullReply.trim();
+      if (replyText) {
+        const ttsRes = await openai.audio.speech.create({
+          model: ttsModel,
+          voice: persona.voice as TTSVoice,
+          input: replyText,
+          response_format: audioFormat,
+          ...(ttsModel === "gpt-4o-mini-tts" && { instructions: persona.voiceInstructions }),
+        });
+
+        const reader = ttsRes.body!.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            await writer.write(sseEvent({
+              type: "audio_chunk",
+              data: Buffer.from(value).toString("base64"),
+            }));
+          }
+        }
+      }
 
       await writer.write(sseEvent({ type: "done", transcript, reply: fullReply }));
     } catch (err) {
