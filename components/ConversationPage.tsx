@@ -1,15 +1,13 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { Settings } from "lucide-react";
 import type { Persona } from "@/lib/personas/types";
 import { useBatchConversation } from "@/lib/batch/useBatchConversation";
 import { useSettings } from "@/lib/settings/useSettings";
 import { SettingsPanel } from "./SettingsPanel";
 import { PersonaSelector } from "./PersonaSelector";
-import { PushToTalkButton } from "./PushToTalkButton";
-
-const SHORT_HOLD_MS = 400;
+import { ConversationButton } from "./ConversationButton";
 
 interface ConversationPageProps {
   personas: Persona[];
@@ -17,10 +15,7 @@ interface ConversationPageProps {
 
 export function ConversationPage({ personas }: ConversationPageProps) {
   const [selectedPersona, setSelectedPersona] = useState<Persona | null>(null);
-  const [showHoldHint, setShowHoldHint] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const holdHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pressStartRef = useRef(0);
 
   const { settings, updateSetting } = useSettings();
 
@@ -32,12 +27,13 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     currentTranscript,
     currentReply,
     playbackVolume,
+    conversationActive,
+    speechDetected,
     prepareMic,
-    startRecording,
-    cancelRecording,
-    stopAndProcess,
+    startConversation,
+    stopConversation,
     reset,
-  } = useBatchConversation(selectedPersona);
+  } = useBatchConversation(selectedPersona, settings);
 
   const handlePersonaSelect = useCallback(
     async (persona: Persona) => {
@@ -50,51 +46,41 @@ export function ConversationPage({ personas }: ConversationPageProps) {
   const handleReset = useCallback(() => {
     reset();
     setSelectedPersona(null);
-    setShowHoldHint(false);
   }, [reset]);
 
-  const handlePressStart = useCallback(() => {
-    pressStartRef.current = Date.now();
-    setShowHoldHint(false);
-    if (holdHintTimerRef.current) clearTimeout(holdHintTimerRef.current);
-    startRecording();
-  }, [startRecording]);
-
-  const handlePressEnd = useCallback(() => {
-    const held = Date.now() - pressStartRef.current;
-    if (held < SHORT_HOLD_MS) {
-      cancelRecording();
-      setShowHoldHint(true);
-      holdHintTimerRef.current = setTimeout(() => setShowHoldHint(false), 2500);
+  const handleConversationToggle = useCallback(() => {
+    if (conversationActive) {
+      stopConversation();
     } else {
-      stopAndProcess(settings);
+      startConversation();
     }
-  }, [cancelRecording, stopAndProcess]);
+  }, [conversationActive, startConversation, stopConversation]);
 
   const isRecording = batchState === "recording";
   const isProcessing = batchState === "processing";
   const isPlaying = batchState === "playing";
-  const isDisabled = isProcessing || isPlaying || !micReady;
+  const isDisabled = !micReady;
 
-  const statusText = showHoldHint
-    ? "Mantén pulsado mientras hablas"
-    : isRecording
-    ? "Grabando... suelta para enviar"
-    : isProcessing
-    ? currentTranscript
-      ? "Respondiendo..."
-      : "Transcribiendo..."
-    : isPlaying
-    ? "Escuchando..."
+  const statusText = conversationActive
+    ? isRecording
+      ? speechDetected
+        ? "Hablando..."
+        : "Escuchando..."
+      : isProcessing
+      ? currentTranscript
+        ? "Respondiendo..."
+        : "Transcribiendo..."
+      : isPlaying
+      ? "Reproduciendo..."
+      : ""
     : batchState === "error"
     ? ""
     : !micReady
     ? "Solicitando micrófono..."
     : messages.length === 0
-    ? "Mantén pulsado para hablar"
-    : "Mantén pulsado para responder";
+    ? "Pulsa para iniciar"
+    : "Conversación pausada";
 
-  // Show historical messages plus any in-flight exchange
   const showInFlight = isProcessing && (currentTranscript || currentReply);
 
   return (
@@ -148,7 +134,6 @@ export function ConversationPage({ personas }: ConversationPageProps) {
             {/* Conversation history */}
             {(messages.length >= 2 || showInFlight) && (
               <div className="w-full flex flex-col gap-3">
-                {/* Last completed exchange — dimmed when an in-flight exchange is visible */}
                 {messages.length >= 2 && (() => {
                   const lastUser = messages[messages.length - 2];
                   const lastAssistant = messages[messages.length - 1];
@@ -167,7 +152,6 @@ export function ConversationPage({ personas }: ConversationPageProps) {
                   );
                 })()}
 
-                {/* In-flight exchange (while processing) */}
                 {showInFlight && (
                   <>
                     {currentTranscript ? (
@@ -190,16 +174,17 @@ export function ConversationPage({ personas }: ConversationPageProps) {
               </div>
             )}
 
-            {/* PTT Button */}
+            {/* Conversation Button */}
             <div className="flex flex-col items-center gap-4">
-              <PushToTalkButton
-                onPressStart={handlePressStart}
-                onPressEnd={handlePressEnd}
-                disabled={isDisabled}
-                isRecording={isRecording}
+              <ConversationButton
+                conversationActive={conversationActive}
+                batchState={batchState}
+                speechDetected={speechDetected}
                 playbackVolume={playbackVolume}
+                onToggle={handleConversationToggle}
+                disabled={isDisabled}
               />
-              <p className={`text-xs select-none min-h-4 transition-colors ${showHoldHint ? "text-amber-400 animate-pulse" : "text-gray-500"}`}>
+              <p className="text-xs select-none min-h-4 text-gray-500">
                 {statusText}
               </p>
             </div>
