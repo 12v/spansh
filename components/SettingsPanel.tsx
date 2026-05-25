@@ -59,6 +59,26 @@ export function SettingsPanel({ settings, onUpdate, onClose }: SettingsPanelProp
           </button>
         </div>
 
+        {/* STT model */}
+        <div className="mb-5">
+          <p className="text-white text-sm font-medium mb-0.5">Transcripción</p>
+          <p className="text-gray-500 text-xs mb-2">Mini is faster and cheaper — recommended</p>
+          <div className="flex gap-2">
+            <ToggleButton
+              active={settings.sttModel === "gpt-4o-mini-transcribe"}
+              onClick={() => onUpdate("sttModel", "gpt-4o-mini-transcribe")}
+            >
+              Mini
+            </ToggleButton>
+            <ToggleButton
+              active={settings.sttModel === "gpt-4o-transcribe"}
+              onClick={() => onUpdate("sttModel", "gpt-4o-transcribe")}
+            >
+              Preciso
+            </ToggleButton>
+          </div>
+        </div>
+
         {/* TTS model */}
         <div className="mb-5">
           <p className="text-white text-sm font-medium mb-0.5">Calidad de voz</p>

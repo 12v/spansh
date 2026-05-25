@@ -50,10 +50,14 @@ export async function POST(req: NextRequest) {
       const audioFormat: "opus" | "pcm" =
         formData.get("audioFormat") === "pcm" ? "pcm" : "opus";
 
-      // Step 1: Whisper (needs complete file)
+      const rawSttModel = formData.get("sttModel") as string | null;
+      const sttModel: "gpt-4o-mini-transcribe" | "gpt-4o-transcribe" =
+        rawSttModel === "gpt-4o-transcribe" ? "gpt-4o-transcribe" : "gpt-4o-mini-transcribe";
+
+      // Step 1: Transcription (needs complete file)
       const transcription = await openai.audio.transcriptions.create({
         file: audio,
-        model: "whisper-1",
+        model: sttModel,
         language: "es",
       });
       const transcript = transcription.text.trim();

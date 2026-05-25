@@ -30,7 +30,7 @@ function mseSupported(): boolean {
 
 export function useBatchConversation(
   persona: Persona | null,
-  settings: Pick<Settings, "ttsModel" | "gptModel">
+  settings: Pick<Settings, "ttsModel" | "gptModel" | "sttModel">
 ) {
   const [batchState, setBatchState] = useState<BatchState>("idle");
   const [micReady, setMicReady] = useState(false);
@@ -223,6 +223,7 @@ export function useBatchConversation(
         formData.append("history", JSON.stringify(messagesRef.current));
         formData.append("ttsModel", settingsRef.current.ttsModel);
         formData.append("gptModel", settingsRef.current.gptModel);
+        formData.append("sttModel", settingsRef.current.sttModel);
         formData.append("audioFormat", useMse ? "opus" : "pcm");
 
         const res = await fetch("/api/process-speech", {
