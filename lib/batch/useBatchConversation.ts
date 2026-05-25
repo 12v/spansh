@@ -53,6 +53,7 @@ export function useBatchConversation(
   // Silence/VAD detection during recording (reuses session audioCtxRef — no separate context needed)
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const micAnalyserRef = useRef<AnalyserNode | null>(null);
+  const micGainRef = useRef<GainNode | null>(null); // silent gain keeps iOS audio graph active
   const silenceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const maxRmsRef = useRef(0);
   const speechDetectedRef = useRef(false);
@@ -93,6 +94,8 @@ export function useBatchConversation(
     micSourceRef.current = null;
     micAnalyserRef.current?.disconnect();
     micAnalyserRef.current = null;
+    micGainRef.current?.disconnect();
+    micGainRef.current = null;
     speechDetectedRef.current = false;
     silenceSinceRef.current = null;
   }, []);
@@ -368,9 +371,18 @@ export function useBatchConversation(
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
     const micSource = ctx.createMediaStreamSource(stream);
+    // Route mic → analyser → silent gain → destination.
+    // iOS WebKit won't process audio nodes that don't lead to an output node,
+    // so the silent gain (gain=0) creates the required destination path without
+    // feeding mic audio into the speakers.
+    const silentGain = ctx.createGain();
+    silentGain.gain.value = 0;
     micSource.connect(analyser);
+    analyser.connect(silentGain);
+    silentGain.connect(ctx.destination);
     micSourceRef.current = micSource;
     micAnalyserRef.current = analyser;
+    micGainRef.current = silentGain;
     const buf = new Float32Array(analyser.fftSize);
 
     silenceIntervalRef.current = setInterval(() => {
