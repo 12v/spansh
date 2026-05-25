@@ -13,6 +13,14 @@ export interface ConversationMessage {
 
 const MSE_MIME = 'audio/ogg; codecs="opus"';
 
+// VAD via ScriptProcessorNode.onaudioprocess — receives PCM frames directly from the
+// audio rendering pipeline. Works on iOS Safari where getFloatTimeDomainData returns
+// zeros for MediaStreamSourceNode (WebKit bug #225564) and where MediaRecorder timeslice
+// is ignored (ondataavailable only fires on stop).
+const SPEECH_THRESHOLD = 0.02;
+const SILENCE_THRESHOLD = 0.01;
+const END_OF_SPEECH_MS = 1500;
+
 function mseSupported(): boolean {
   return (
     typeof MediaSource !== "undefined" &&
@@ -20,37 +28,46 @@ function mseSupported(): boolean {
   );
 }
 
-export function useBatchConversation(persona: Persona | null) {
+export function useBatchConversation(
+  persona: Persona | null,
+  settings: Pick<Settings, "ttsModel" | "gptModel">
+) {
   const [batchState, setBatchState] = useState<BatchState>("idle");
   const [micReady, setMicReady] = useState(false);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [currentTranscript, setCurrentTranscript] = useState("");
   const [currentReply, setCurrentReply] = useState("");
+  const [conversationActive, setConversationActive] = useState(false);
+  const [speechDetected, setSpeechDetected] = useState(false);
 
-  const streamRef = useRef<MediaStream | null>(null);
+  // Latest-value ref so VAD always reads current settings
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  // Session-level persistent mic stream (open for the entire conversation session)
+  const sessionStreamRef = useRef<MediaStream | null>(null);
+
+  // Per-turn recording refs
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
-  // Silence detection: sample RMS every 50 ms while recording
-  const analyserCtxRef = useRef<AudioContext | null>(null);
-  const silenceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const maxRmsRef = useRef(0);
+  // VAD state — driven by ScriptProcessorNode.onaudioprocess
+  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const speechDetectedRef = useRef(false);
+  const silenceSinceRef = useRef<number | null>(null);
+  const vadActiveRef = useRef(false); // false prevents re-entrancy once auto-stop fires
 
-  const stopSilenceDetection = useCallback(() => {
-    if (silenceIntervalRef.current !== null) {
-      clearInterval(silenceIntervalRef.current);
-      silenceIntervalRef.current = null;
-    }
-    analyserCtxRef.current?.close().catch(() => {});
-    analyserCtxRef.current = null;
-  }, []);
+  // Conversation session state (ref copy for use inside async callbacks)
+  const conversationActiveRef = useRef(false);
 
-  // Playback — Web Audio API for volume visualisation (analyser always in chain).
-  // MSE path: server streams Opus bytes → SourceBuffer → <audio> → MediaElementSourceNode → analyser
-  // Fallback path: accumulate all bytes → decodeAudioData once → BufferSourceNode → analyser
+  // Abort controller for in-flight fetch
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Playback — session-scoped AudioContext (created in startConversation for iOS gesture requirement)
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -67,8 +84,18 @@ export function useBatchConversation(persona: Persona | null) {
   const drainFnRef = useRef<(() => void) | null>(null);
 
   // PCM fallback refs (Safari: stream 24kHz 16-bit mono PCM, schedule synchronously)
-  const pcmLeftoverRef = useRef<number | null>(null); // orphaned byte at chunk boundary
+  const pcmLeftoverRef = useRef<number | null>(null);
   const nextStartTimeRef = useRef(0);
+
+  const stopVad = useCallback(() => {
+    vadActiveRef.current = false;
+    speechDetectedRef.current = false;
+    silenceSinceRef.current = null;
+    scriptProcessorRef.current?.disconnect();
+    scriptProcessorRef.current = null;
+    micSourceRef.current?.disconnect();
+    micSourceRef.current = null;
+  }, []);
 
   // Call once when a persona is selected to prompt for mic permission before the
   // first recording, so the permission dialog doesn't interrupt the user speaking.
@@ -84,88 +111,30 @@ export function useBatchConversation(persona: Persona | null) {
     }
   }, []);
 
-  const startRecording = useCallback(async () => {
-    if (!persona || batchState !== "idle") return;
-    setErrorMessage(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
-      });
-      streamRef.current = stream;
-
-      // Wire up silence detection via AnalyserNode
-      maxRmsRef.current = 0;
-      const actx = new AudioContext();
-      analyserCtxRef.current = actx;
-      const analyser = actx.createAnalyser();
-      analyser.fftSize = 256;
-      actx.createMediaStreamSource(stream).connect(analyser);
-      const buf = new Float32Array(analyser.fftSize);
-      silenceIntervalRef.current = setInterval(() => {
-        analyser.getFloatTimeDomainData(buf);
-        let sum = 0;
-        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-        const rms = Math.sqrt(sum / buf.length);
-        if (rms > maxRmsRef.current) maxRmsRef.current = rms;
-      }, 50);
-
-      const recorder = new MediaRecorder(stream);
-      recorderRef.current = recorder;
-      chunksRef.current = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
-      recorder.start();
-      setBatchState("recording");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "No se pudo acceder al micrófono";
-      setErrorMessage(msg);
-      setBatchState("error");
-    }
-  }, [persona, batchState]);
-
-  // Stop and discard the current recording without sending it to the server.
-  const cancelRecording = useCallback(() => {
-    stopSilenceDetection();
+  // Internal: stop current recorder and send audio to server
+  const stopAndProcessInternal = useCallback(() => {
     const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.ondataavailable = null;
-      recorder.stop();
-    }
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    recorderRef.current = null;
-    chunksRef.current = [];
-    setBatchState("idle");
-  }, [stopSilenceDetection]);
+    if (!recorder || recorder.state === "inactive") return;
 
-  const SILENCE_THRESHOLD = 0.01;
-
-  const stopAndProcess = useCallback(async (settings: Pick<Settings, "ttsModel" | "gptModel">) => {
-    const recorder = recorderRef.current;
-    if (!recorder || batchState !== "recording") return;
-
-    const peakRms = maxRmsRef.current;
-    stopSilenceDetection();
+    const hadSpeech = speechDetectedRef.current;
+    stopVad();
 
     setBatchState("processing");
     setCurrentTranscript("");
     setCurrentReply("");
 
-    // --- Audio context setup (synchronous, within PTT release gesture) ---
-    audioCtxRef.current?.close().catch(() => {});
-    audioCtxRef.current = new AudioContext();
-    audioCtxRef.current.resume().catch(() => {});
-    analyserRef.current = audioCtxRef.current.createAnalyser();
-    analyserRef.current.fftSize = 256;
+    // Set up analyser for playback visualisation (reuses session-scoped AudioContext)
+    if (audioCtxRef.current) {
+      analyserRef.current = audioCtxRef.current.createAnalyser();
+      analyserRef.current.fftSize = 256;
+    }
 
     const useMse = mseSupported();
     useMseRef.current = useMse;
 
     let sourceOpenPromise: Promise<void> | null = null;
 
-    if (useMse) {
-      // Create MediaSource and wire it up before any await so iOS play() is in gesture context
+    if (useMse && audioCtxRef.current && analyserRef.current) {
       const ms = new MediaSource();
       const url = URL.createObjectURL(ms);
       const audioEl = new Audio();
@@ -186,185 +155,353 @@ export function useBatchConversation(persona: Persona | null) {
       objectUrlRef.current = url;
       pendingChunksRef.current = [];
       endOfStreamPendingRef.current = false;
-    } else {
+    } else if (!useMse && analyserRef.current && audioCtxRef.current) {
       analyserRef.current.connect(audioCtxRef.current.destination);
       pcmLeftoverRef.current = null;
       nextStartTimeRef.current = 0;
     }
 
-    await new Promise<void>((resolve) => {
-      recorder.onstop = () => resolve();
-      recorder.stop();
-    });
+    (async () => {
+      try {
+        await new Promise<void>((resolve) => {
+          recorder.onstop = () => resolve();
+          recorder.stop();
+        });
 
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    recorderRef.current = null;
+        recorderRef.current = null;
 
-    if (peakRms < SILENCE_THRESHOLD) {
-      chunksRef.current = [];
-      setErrorMessage("No se detectó audio. Intenta de nuevo.");
-      setBatchState("idle");
-      return;
-    }
-
-    const mimeType = recorder.mimeType || "audio/webm";
-    const ext = mimeType.includes("mp4") ? "mp4" : "webm";
-    const blob = new Blob(chunksRef.current, { type: mimeType });
-    chunksRef.current = [];
-
-    // Wait for sourceopen and add SourceBuffer before SSE starts arriving
-    if (useMse && sourceOpenPromise) {
-      await sourceOpenPromise;
-      const sb = mediaSourceRef.current!.addSourceBuffer(MSE_MIME);
-      sourceBufferRef.current = sb;
-
-      function drain() {
-        const s = sourceBufferRef.current;
-        const ms2 = mediaSourceRef.current;
-        if (!s || s.updating) return;
-        if (pendingChunksRef.current.length > 0) {
-          s.appendBuffer(pendingChunksRef.current.shift()!);
-        } else if (endOfStreamPendingRef.current && ms2?.readyState === "open") {
-          ms2.endOfStream();
-          endOfStreamPendingRef.current = false;
+        if (!hadSpeech) {
+          chunksRef.current = [];
+          setErrorMessage("No se detectó audio. Intenta de nuevo.");
+          setSpeechDetected(false);
+          setBatchState("idle");
+          return;
         }
-      }
 
-      drainFnRef.current = drain;
-      sb.addEventListener("updateend", drain);
+        if (!conversationActiveRef.current) {
+          chunksRef.current = [];
+          return;
+        }
 
-      if (audioElRef.current) {
-        audioElRef.current.onended = () => setBatchState("idle");
-        audioElRef.current.onerror = () => setBatchState("idle");
-      }
-    }
+        const mimeType = recorder.mimeType || "audio/webm";
+        const ext = mimeType.includes("mp4") ? "mp4" : "webm";
+        const blob = new Blob(chunksRef.current, { type: mimeType });
+        chunksRef.current = [];
 
-    try {
-      const formData = new FormData();
-      formData.append("audio", blob, `recording.${ext}`);
-      formData.append("personaId", persona!.id);
-      formData.append("history", JSON.stringify(messagesRef.current));
-      formData.append("ttsModel", settings.ttsModel);
-      formData.append("gptModel", settings.gptModel);
-      formData.append("audioFormat", useMse ? "opus" : "pcm");
+        if (useMse && sourceOpenPromise) {
+          await sourceOpenPromise;
+          const sb = mediaSourceRef.current!.addSourceBuffer(MSE_MIME);
+          sourceBufferRef.current = sb;
 
-      const res = await fetch("/api/process-speech", { method: "POST", body: formData });
-
-      if (!res.ok || !res.body) {
-        const err = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error(err.error ?? `Error ${res.status}`);
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let sseBuffer = "";
-      let finalTranscript = "";
-      let finalReply = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        sseBuffer += decoder.decode(value, { stream: true });
-
-        const events = sseBuffer.split("\n\n");
-        sseBuffer = events.pop() ?? "";
-
-        for (const event of events) {
-          const dataLine = event.split("\n").find((l) => l.startsWith("data: "));
-          if (!dataLine) continue;
-          const data = JSON.parse(dataLine.slice(6));
-
-          switch (data.type) {
-            case "transcript":
-              finalTranscript = data.text;
-              setCurrentTranscript(data.text);
-              break;
-
-            case "text_delta":
-              setCurrentReply((prev) => prev + data.text);
-              finalReply += data.text;
-              break;
-
-            case "audio_chunk": {
-              const raw = atob(data.data);
-              if (useMse) {
-                const bytes = new Uint8Array(raw.length);
-                for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-                pendingChunksRef.current.push(bytes.buffer as ArrayBuffer);
-                drainFnRef.current?.();
-              } else {
-                // PCM path: 24 kHz, 16-bit signed little-endian, mono.
-                // Prepend any orphaned byte from the previous chunk, save one if this chunk is odd.
-                let pcm = raw;
-                if (pcmLeftoverRef.current !== null) {
-                  pcm = String.fromCharCode(pcmLeftoverRef.current) + pcm;
-                  pcmLeftoverRef.current = null;
-                }
-                if (pcm.length % 2 !== 0) {
-                  pcmLeftoverRef.current = pcm.charCodeAt(pcm.length - 1);
-                  pcm = pcm.slice(0, -1);
-                }
-                const sampleCount = pcm.length / 2;
-                if (sampleCount > 0) {
-                  const ctx = audioCtxRef.current!;
-                  const audioBuffer = ctx.createBuffer(1, sampleCount, 24000);
-                  const ch = audioBuffer.getChannelData(0);
-                  for (let i = 0; i < sampleCount; i++) {
-                    const lo = pcm.charCodeAt(i * 2);
-                    const hi = pcm.charCodeAt(i * 2 + 1);
-                    let s = (hi << 8) | lo;
-                    if (s >= 0x8000) s -= 0x10000;
-                    ch[i] = s / 32768;
-                  }
-                  const source = ctx.createBufferSource();
-                  source.buffer = audioBuffer;
-                  source.connect(analyserRef.current ?? ctx.destination);
-                  const startAt = Math.max(ctx.currentTime, nextStartTimeRef.current);
-                  source.start(startAt);
-                  nextStartTimeRef.current = startAt + audioBuffer.duration;
-                }
-              }
-              break;
+          function drain() {
+            const s = sourceBufferRef.current;
+            const ms2 = mediaSourceRef.current;
+            if (!s || s.updating) return;
+            if (pendingChunksRef.current.length > 0) {
+              s.appendBuffer(pendingChunksRef.current.shift()!);
+            } else if (endOfStreamPendingRef.current && ms2?.readyState === "open") {
+              ms2.endOfStream();
+              endOfStreamPendingRef.current = false;
             }
+          }
 
-            case "done": {
-              if (data.transcript) finalTranscript = data.transcript;
-              if (data.reply) finalReply = data.reply;
-              setMessages((prev) => [
-                ...prev,
-                { role: "user", content: finalTranscript },
-                { role: "assistant", content: finalReply },
-              ]);
-              setCurrentTranscript("");
-              setCurrentReply("");
+          drainFnRef.current = drain;
+          sb.addEventListener("updateend", drain);
 
-              if (useMse) {
-                endOfStreamPendingRef.current = true;
-                drainFnRef.current?.();
-                setBatchState("playing");
-              } else {
-                // PCM: all chunks already scheduled; check if audio is still ahead
-                const ctx = audioCtxRef.current;
-                setBatchState(ctx && nextStartTimeRef.current > ctx.currentTime ? "playing" : "idle");
-              }
-              break;
-            }
-
-            case "error":
-              throw new Error(data.message);
+          if (audioElRef.current) {
+            audioElRef.current.onended = () => setBatchState("idle");
+            audioElRef.current.onerror = () => setBatchState("idle");
           }
         }
+
+        const abortController = new AbortController();
+        abortControllerRef.current = abortController;
+
+        const formData = new FormData();
+        formData.append("audio", blob, `recording.${ext}`);
+        formData.append("personaId", persona!.id);
+        formData.append("history", JSON.stringify(messagesRef.current));
+        formData.append("ttsModel", settingsRef.current.ttsModel);
+        formData.append("gptModel", settingsRef.current.gptModel);
+        formData.append("audioFormat", useMse ? "opus" : "pcm");
+
+        const res = await fetch("/api/process-speech", {
+          method: "POST",
+          body: formData,
+          signal: abortController.signal,
+        });
+
+        if (!res.ok || !res.body) {
+          const err = await res.json().catch(() => ({ error: res.statusText }));
+          throw new Error(err.error ?? `Error ${res.status}`);
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = "";
+        let finalTranscript = "";
+        let finalReply = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          sseBuffer += decoder.decode(value, { stream: true });
+
+          const events = sseBuffer.split("\n\n");
+          sseBuffer = events.pop() ?? "";
+
+          for (const event of events) {
+            const dataLine = event.split("\n").find((l) => l.startsWith("data: "));
+            if (!dataLine) continue;
+            const data = JSON.parse(dataLine.slice(6));
+
+            switch (data.type) {
+              case "transcript":
+                finalTranscript = data.text;
+                setCurrentTranscript(data.text);
+                break;
+
+              case "text_delta":
+                setCurrentReply((prev) => prev + data.text);
+                finalReply += data.text;
+                break;
+
+              case "audio_chunk": {
+                const raw = atob(data.data);
+                if (useMse) {
+                  const bytes = new Uint8Array(raw.length);
+                  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+                  pendingChunksRef.current.push(bytes.buffer as ArrayBuffer);
+                  drainFnRef.current?.();
+                } else {
+                  // PCM path: 24 kHz, 16-bit signed little-endian, mono.
+                  let pcm = raw;
+                  if (pcmLeftoverRef.current !== null) {
+                    pcm = String.fromCharCode(pcmLeftoverRef.current) + pcm;
+                    pcmLeftoverRef.current = null;
+                  }
+                  if (pcm.length % 2 !== 0) {
+                    pcmLeftoverRef.current = pcm.charCodeAt(pcm.length - 1);
+                    pcm = pcm.slice(0, -1);
+                  }
+                  const sampleCount = pcm.length / 2;
+                  if (sampleCount > 0) {
+                    const ctx = audioCtxRef.current!;
+                    const audioBuffer = ctx.createBuffer(1, sampleCount, 24000);
+                    const ch = audioBuffer.getChannelData(0);
+                    for (let i = 0; i < sampleCount; i++) {
+                      const lo = pcm.charCodeAt(i * 2);
+                      const hi = pcm.charCodeAt(i * 2 + 1);
+                      let s = (hi << 8) | lo;
+                      if (s >= 0x8000) s -= 0x10000;
+                      ch[i] = s / 32768;
+                    }
+                    const source = ctx.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(analyserRef.current ?? ctx.destination);
+                    const startAt = Math.max(ctx.currentTime, nextStartTimeRef.current);
+                    source.start(startAt);
+                    nextStartTimeRef.current = startAt + audioBuffer.duration;
+                  }
+                }
+                break;
+              }
+
+              case "done": {
+                if (data.transcript) finalTranscript = data.transcript;
+                if (data.reply) finalReply = data.reply;
+                setMessages((prev) => [
+                  ...prev,
+                  { role: "user", content: finalTranscript },
+                  { role: "assistant", content: finalReply },
+                ]);
+                setCurrentTranscript("");
+                setCurrentReply("");
+
+                if (useMse) {
+                  endOfStreamPendingRef.current = true;
+                  drainFnRef.current?.();
+                  setBatchState("playing");
+                } else {
+                  const ctx = audioCtxRef.current;
+                  setBatchState(ctx && nextStartTimeRef.current > ctx.currentTime ? "playing" : "idle");
+                }
+                break;
+              }
+
+              case "error":
+                throw new Error(data.message);
+            }
+          }
+        }
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") return;
+        const msg = err instanceof Error ? err.message : "Error al procesar";
+        setErrorMessage(msg);
+        setBatchState("error");
       }
+    })();
+  }, [persona, stopVad]);
+
+  // Internal: start recording a new turn using the existing session stream.
+  // VAD is driven by MediaRecorder ondataavailable (timeslice mode) — avoids
+  // Web Audio API / AnalyserNode which returns zeros on iOS Safari (WebKit bug #225564).
+  const startRecordingTurn = useCallback(() => {
+    if (!conversationActiveRef.current || !sessionStreamRef.current || batchState !== "idle") return;
+
+    const stream = sessionStreamRef.current;
+
+    speechDetectedRef.current = false;
+    silenceSinceRef.current = null;
+    vadActiveRef.current = true;
+    setSpeechDetected(false);
+    setErrorMessage(null);
+
+    // ScriptProcessorNode receives PCM frames directly from the audio rendering pipeline.
+    // iOS Safari ignores MediaRecorder timeslice AND has a bug where getFloatTimeDomainData
+    // returns zeros for MediaStreamSourceNode — onaudioprocess is unaffected by both.
+    const ctx = audioCtxRef.current;
+    if (!ctx) return;
+    const scriptProcessor = ctx.createScriptProcessor(2048, 1, 1);
+    const micSource = ctx.createMediaStreamSource(stream);
+    // silentGain(0) → destination: iOS WebKit won't process nodes without a destination path
+    const silentGain = ctx.createGain();
+    silentGain.gain.value = 0;
+    micSource.connect(scriptProcessor);
+    scriptProcessor.connect(silentGain);
+    silentGain.connect(ctx.destination);
+    scriptProcessorRef.current = scriptProcessor;
+    micSourceRef.current = micSource;
+
+    scriptProcessor.onaudioprocess = (event) => {
+      if (!vadActiveRef.current) return;
+      const input = event.inputBuffer.getChannelData(0);
+      let sum = 0;
+      for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+      const rms = Math.sqrt(sum / input.length);
+
+      if (rms >= SPEECH_THRESHOLD) {
+        if (!speechDetectedRef.current) {
+          speechDetectedRef.current = true;
+          setSpeechDetected(true);
+        }
+        silenceSinceRef.current = null;
+      } else if (rms < SILENCE_THRESHOLD && speechDetectedRef.current) {
+        if (silenceSinceRef.current === null) {
+          silenceSinceRef.current = Date.now();
+        } else if (Date.now() - silenceSinceRef.current >= END_OF_SPEECH_MS) {
+          stopAndProcessInternal();
+        }
+      }
+    };
+
+    const recorder = new MediaRecorder(stream);
+    recorderRef.current = recorder;
+    chunksRef.current = [];
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunksRef.current.push(e.data);
+    };
+    recorder.start();
+    setBatchState("recording");
+  }, [batchState, stopAndProcessInternal]);
+
+  // Auto-restart: when state returns to idle during an active session, start the next turn
+  useEffect(() => {
+    if (batchState === "idle" && conversationActiveRef.current) {
+      const timer = setTimeout(() => {
+        if (conversationActiveRef.current) startRecordingTurn();
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [batchState, conversationActive, startRecordingTurn]);
+
+  const startConversation = useCallback(async () => {
+    if (!persona || conversationActiveRef.current) return;
+    setErrorMessage(null);
+
+    // Create AudioContext synchronously within the gesture handler — iOS Safari requires
+    // this before any await, otherwise the context starts suspended and can't be resumed.
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = new AudioContext();
+    audioCtxRef.current.resume().catch(() => {});
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      });
+      sessionStreamRef.current = stream;
+
+      conversationActiveRef.current = true;
+      setConversationActive(true);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Error al procesar";
+      audioCtxRef.current?.close().catch(() => {});
+      audioCtxRef.current = null;
+      const msg = err instanceof Error ? err.message : "No se pudo acceder al micrófono";
       setErrorMessage(msg);
       setBatchState("error");
     }
-  }, [persona, batchState, stopSilenceDetection]);
+  }, [persona]);
 
-  // RAF loop: reads analyser for volume glow while in "playing" state.
-  // MSE path ends via audioEl.onended; fallback path ends via nextStartTimeRef.
+  const stopConversation = useCallback(() => {
+    conversationActiveRef.current = false;
+    setConversationActive(false);
+
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+
+    stopVad();
+
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.ondataavailable = null;
+      recorder.stop();
+    }
+    recorderRef.current = null;
+    chunksRef.current = [];
+
+    sessionStreamRef.current?.getTracks().forEach((t) => t.stop());
+    sessionStreamRef.current = null;
+
+    if (audioElRef.current) audioElRef.current.pause();
+
+    if (sourceBufferRef.current && drainFnRef.current) {
+      sourceBufferRef.current.removeEventListener("updateend", drainFnRef.current);
+    }
+    if (audioElRef.current) {
+      audioElRef.current.onended = null;
+      audioElRef.current.onerror = null;
+      audioElRef.current.src = "";
+    }
+    if (mediaSourceRef.current?.readyState === "open") {
+      try { mediaSourceRef.current.endOfStream(); } catch { /* already closed */ }
+    }
+    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    mediaSourceRef.current = null;
+    sourceBufferRef.current = null;
+    audioElRef.current = null;
+    objectUrlRef.current = null;
+    pendingChunksRef.current = [];
+    endOfStreamPendingRef.current = false;
+    drainFnRef.current = null;
+    useMseRef.current = false;
+    pcmLeftoverRef.current = null;
+    nextStartTimeRef.current = 0;
+
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
+    analyserRef.current = null;
+
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+
+    setSpeechDetected(false);
+    setPlaybackVolume(0);
+    setBatchState("idle");
+  }, [stopVad]);
+
+  // RAF loop: reads analyser for volume glow while in "playing" state
   useEffect(() => {
     if (batchState !== "playing") {
       if (rafRef.current !== null) {
@@ -392,7 +529,6 @@ export function useBatchConversation(persona: Persona | null) {
       }
       setPlaybackVolume(Math.min(Math.sqrt(sum / buf.length) * 5, 1));
 
-      // Fallback path only: end when scheduled audio is done
       if (!useMseRef.current && ctx!.currentTime >= nextStartTimeRef.current) {
         setBatchState("idle");
         return;
@@ -411,13 +547,19 @@ export function useBatchConversation(persona: Persona | null) {
   }, [batchState]);
 
   const reset = useCallback(() => {
-    stopSilenceDetection();
+    conversationActiveRef.current = false;
+    setConversationActive(false);
+
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+
+    stopVad();
+
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
 
-    // MSE cleanup
     if (sourceBufferRef.current && drainFnRef.current) {
       sourceBufferRef.current.removeEventListener("updateend", drainFnRef.current);
     }
@@ -430,9 +572,7 @@ export function useBatchConversation(persona: Persona | null) {
     if (mediaSourceRef.current?.readyState === "open") {
       try { mediaSourceRef.current.endOfStream(); } catch { /* already closed */ }
     }
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-    }
+    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     mediaSourceRef.current = null;
     sourceBufferRef.current = null;
     audioElRef.current = null;
@@ -443,8 +583,14 @@ export function useBatchConversation(persona: Persona | null) {
     drainFnRef.current = null;
     useMseRef.current = false;
 
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
+    sessionStreamRef.current?.getTracks().forEach((t) => t.stop());
+    sessionStreamRef.current = null;
+
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.ondataavailable = null;
+      recorder.stop();
+    }
     recorderRef.current = null;
     chunksRef.current = [];
     nextStartTimeRef.current = 0;
@@ -456,9 +602,10 @@ export function useBatchConversation(persona: Persona | null) {
     setCurrentTranscript("");
     setCurrentReply("");
     setErrorMessage(null);
+    setSpeechDetected(false);
     setPlaybackVolume(0);
     setBatchState("idle");
-  }, [stopSilenceDetection]);
+  }, [stopVad]);
 
   return {
     batchState,
@@ -468,10 +615,11 @@ export function useBatchConversation(persona: Persona | null) {
     currentTranscript,
     currentReply,
     playbackVolume,
+    conversationActive,
+    speechDetected,
     prepareMic,
-    startRecording,
-    cancelRecording,
-    stopAndProcess,
+    startConversation,
+    stopConversation,
     reset,
   };
 }
