@@ -62,8 +62,14 @@ export function SettingsPanel({ settings, onUpdate, onClose }: SettingsPanelProp
         {/* TTS model */}
         <div className="mb-5">
           <p className="text-white text-sm font-medium mb-0.5">Calidad de voz</p>
-          <p className="text-gray-500 text-xs mb-2">HD has better intonation for questions</p>
+          <p className="text-gray-500 text-xs mb-2">Mini follows accent instructions — recommended</p>
           <div className="flex gap-2">
+            <ToggleButton
+              active={settings.ttsModel === "gpt-4o-mini-tts"}
+              onClick={() => onUpdate("ttsModel", "gpt-4o-mini-tts")}
+            >
+              Mini
+            </ToggleButton>
             <ToggleButton
               active={settings.ttsModel === "tts-1"}
               onClick={() => onUpdate("ttsModel", "tts-1")}

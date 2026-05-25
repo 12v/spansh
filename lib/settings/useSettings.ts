@@ -3,13 +3,13 @@
 import { useCallback, useState } from "react";
 
 export interface Settings {
-  ttsModel: "tts-1" | "tts-1-hd";
+  ttsModel: "gpt-4o-mini-tts" | "tts-1" | "tts-1-hd";
   gptModel: "gpt-4o-mini" | "gpt-4o";
   listeningMode: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  ttsModel: "tts-1-hd",
+  ttsModel: "gpt-4o-mini-tts",
   gptModel: "gpt-4o-mini",
   listeningMode: false,
 };
