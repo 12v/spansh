@@ -413,11 +413,17 @@ export function useBatchConversation(
       }, 300);
       return () => clearTimeout(timer);
     }
-  }, [batchState, startRecordingTurn]);
+  }, [batchState, conversationActive, startRecordingTurn]);
 
   const startConversation = useCallback(async () => {
     if (!persona || conversationActiveRef.current) return;
     setErrorMessage(null);
+
+    // Create AudioContext synchronously within the gesture handler — iOS Safari requires
+    // this before any await, otherwise the context starts suspended and can't be resumed.
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = new AudioContext();
+    audioCtxRef.current.resume().catch(() => {});
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -425,15 +431,11 @@ export function useBatchConversation(
       });
       sessionStreamRef.current = stream;
 
-      // Create AudioContext here (gesture context) — required for iOS Safari autoplay policy.
-      // This context is reused across all turns of the session.
-      audioCtxRef.current?.close().catch(() => {});
-      audioCtxRef.current = new AudioContext();
-      audioCtxRef.current.resume().catch(() => {});
-
       conversationActiveRef.current = true;
       setConversationActive(true);
     } catch (err) {
+      audioCtxRef.current?.close().catch(() => {});
+      audioCtxRef.current = null;
       const msg = err instanceof Error ? err.message : "No se pudo acceder al micrófono";
       setErrorMessage(msg);
       setBatchState("error");
