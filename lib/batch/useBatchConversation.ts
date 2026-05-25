@@ -13,8 +13,11 @@ export interface ConversationMessage {
 
 const MSE_MIME = 'audio/ogg; codecs="opus"';
 
-const SPEECH_THRESHOLD = 0.02;
-const SILENCE_THRESHOLD = 0.01;
+// VAD via MediaRecorder timeslice: all codecs (AAC on iOS, Opus on desktop) produce
+// dramatically larger packets for speech than silence. 100ms at typical bitrates:
+//   silence → ~10–50 bytes, speech → ~300–1500 bytes
+const TIMESLICE_MS = 100;
+const SPEECH_SIZE_THRESHOLD = 100; // bytes per timeslice
 const END_OF_SPEECH_MS = 1500;
 
 function mseSupported(): boolean {
@@ -37,7 +40,7 @@ export function useBatchConversation(
   const [conversationActive, setConversationActive] = useState(false);
   const [speechDetected, setSpeechDetected] = useState(false);
 
-  // Latest-value ref so VAD timer always reads current settings
+  // Latest-value ref so VAD always reads current settings
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
 
@@ -50,14 +53,10 @@ export function useBatchConversation(
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
-  // Silence/VAD detection during recording (reuses session audioCtxRef — no separate context needed)
-  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const micAnalyserRef = useRef<AnalyserNode | null>(null);
-  const micGainRef = useRef<GainNode | null>(null); // silent gain keeps iOS audio graph active
-  const silenceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const maxRmsRef = useRef(0);
+  // VAD state — driven by MediaRecorder ondataavailable (no Web Audio needed)
   const speechDetectedRef = useRef(false);
   const silenceSinceRef = useRef<number | null>(null);
+  const vadActiveRef = useRef(false); // false prevents re-entrancy once auto-stop fires
 
   // Conversation session state (ref copy for use inside async callbacks)
   const conversationActiveRef = useRef(false);
@@ -85,17 +84,8 @@ export function useBatchConversation(
   const pcmLeftoverRef = useRef<number | null>(null);
   const nextStartTimeRef = useRef(0);
 
-  const stopSilenceDetection = useCallback(() => {
-    if (silenceIntervalRef.current !== null) {
-      clearInterval(silenceIntervalRef.current);
-      silenceIntervalRef.current = null;
-    }
-    micSourceRef.current?.disconnect();
-    micSourceRef.current = null;
-    micAnalyserRef.current?.disconnect();
-    micAnalyserRef.current = null;
-    micGainRef.current?.disconnect();
-    micGainRef.current = null;
+  const stopVad = useCallback(() => {
+    vadActiveRef.current = false;
     speechDetectedRef.current = false;
     silenceSinceRef.current = null;
   }, []);
@@ -115,20 +105,18 @@ export function useBatchConversation(
   }, []);
 
   // Internal: stop current recorder and send audio to server
-  // Must not be called with await from inside the VAD interval — wraps itself in async IIFE
   const stopAndProcessInternal = useCallback(() => {
     const recorder = recorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
 
-    const peakRms = maxRmsRef.current;
-    stopSilenceDetection();
+    const hadSpeech = speechDetectedRef.current;
+    stopVad();
 
     setBatchState("processing");
     setCurrentTranscript("");
     setCurrentReply("");
 
-    // --- Audio context: session-scoped, already created in startConversation ---
-    // Set up analyser for this turn's playback visualisation
+    // Set up analyser for playback visualisation (reuses session-scoped AudioContext)
     if (audioCtxRef.current) {
       analyserRef.current = audioCtxRef.current.createAnalyser();
       analyserRef.current.fftSize = 256;
@@ -166,7 +154,6 @@ export function useBatchConversation(
       nextStartTimeRef.current = 0;
     }
 
-    // Run the async portion separately so VAD interval callback returns immediately
     (async () => {
       try {
         await new Promise<void>((resolve) => {
@@ -175,9 +162,8 @@ export function useBatchConversation(
         });
 
         recorderRef.current = null;
-        // Note: sessionStreamRef is NOT stopped here — it's kept alive for the session
 
-        if (peakRms < SILENCE_THRESHOLD) {
+        if (!hadSpeech) {
           chunksRef.current = [];
           setErrorMessage("No se detectó audio. Intenta de nuevo.");
           setSpeechDetected(false);
@@ -195,7 +181,6 @@ export function useBatchConversation(
         const blob = new Blob(chunksRef.current, { type: mimeType });
         chunksRef.current = [];
 
-        // Wait for sourceopen and add SourceBuffer before SSE starts arriving
         if (useMse && sourceOpenPromise) {
           await sourceOpenPromise;
           const sb = mediaSourceRef.current!.addSourceBuffer(MSE_MIME);
@@ -349,69 +334,48 @@ export function useBatchConversation(
         setBatchState("error");
       }
     })();
-  }, [persona, stopSilenceDetection]);
+  }, [persona, stopVad]);
 
-  // Internal: start recording a new turn using the existing session stream
+  // Internal: start recording a new turn using the existing session stream.
+  // VAD is driven by MediaRecorder ondataavailable (timeslice mode) — avoids
+  // Web Audio API / AnalyserNode which returns zeros on iOS Safari (WebKit bug #225564).
   const startRecordingTurn = useCallback(() => {
     if (!conversationActiveRef.current || !sessionStreamRef.current || batchState !== "idle") return;
 
     const stream = sessionStreamRef.current;
 
-    maxRmsRef.current = 0;
     speechDetectedRef.current = false;
     silenceSinceRef.current = null;
+    vadActiveRef.current = true;
     setSpeechDetected(false);
     setErrorMessage(null);
 
-    // Reuse the session-scoped AudioContext (already resumed in startConversation gesture).
-    // Creating a new AudioContext here would be suspended on iOS Safari since this runs
-    // inside a setTimeout callback, not a user gesture.
-    const ctx = audioCtxRef.current;
-    if (!ctx) return;
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 256;
-    const micSource = ctx.createMediaStreamSource(stream);
-    // Route mic → analyser → silent gain → destination.
-    // iOS WebKit won't process audio nodes that don't lead to an output node,
-    // so the silent gain (gain=0) creates the required destination path without
-    // feeding mic audio into the speakers.
-    const silentGain = ctx.createGain();
-    silentGain.gain.value = 0;
-    micSource.connect(analyser);
-    analyser.connect(silentGain);
-    silentGain.connect(ctx.destination);
-    micSourceRef.current = micSource;
-    micAnalyserRef.current = analyser;
-    micGainRef.current = silentGain;
-    const buf = new Float32Array(analyser.fftSize);
+    const recorder = new MediaRecorder(stream);
+    recorderRef.current = recorder;
+    chunksRef.current = [];
 
-    silenceIntervalRef.current = setInterval(() => {
-      analyser.getFloatTimeDomainData(buf);
-      let sum = 0;
-      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-      const rms = Math.sqrt(sum / buf.length);
-      if (rms > maxRmsRef.current) maxRmsRef.current = rms;
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunksRef.current.push(e.data);
+      if (!vadActiveRef.current) return;
 
-      if (rms >= SPEECH_THRESHOLD) {
-        speechDetectedRef.current = true;
+      const isSpeech = e.data.size > SPEECH_SIZE_THRESHOLD;
+
+      if (isSpeech) {
+        if (!speechDetectedRef.current) {
+          speechDetectedRef.current = true;
+          setSpeechDetected(true);
+        }
         silenceSinceRef.current = null;
-        setSpeechDetected(true);
-      } else if (rms < SILENCE_THRESHOLD && speechDetectedRef.current) {
+      } else if (speechDetectedRef.current) {
         if (silenceSinceRef.current === null) {
           silenceSinceRef.current = Date.now();
         } else if (Date.now() - silenceSinceRef.current >= END_OF_SPEECH_MS) {
           stopAndProcessInternal();
         }
       }
-    }, 50);
-
-    const recorder = new MediaRecorder(stream);
-    recorderRef.current = recorder;
-    chunksRef.current = [];
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunksRef.current.push(e.data);
     };
-    recorder.start();
+
+    recorder.start(TIMESLICE_MS);
     setBatchState("recording");
   }, [batchState, stopAndProcessInternal]);
 
@@ -443,7 +407,6 @@ export function useBatchConversation(
 
       conversationActiveRef.current = true;
       setConversationActive(true);
-      // batchState stays "idle" — auto-restart effect fires after this render
     } catch (err) {
       const msg = err instanceof Error ? err.message : "No se pudo acceder al micrófono";
       setErrorMessage(msg);
@@ -458,7 +421,7 @@ export function useBatchConversation(
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
 
-    stopSilenceDetection();
+    stopVad();
 
     const recorder = recorderRef.current;
     if (recorder && recorder.state !== "inactive") {
@@ -473,7 +436,6 @@ export function useBatchConversation(
 
     if (audioElRef.current) audioElRef.current.pause();
 
-    // MSE cleanup
     if (sourceBufferRef.current && drainFnRef.current) {
       sourceBufferRef.current.removeEventListener("updateend", drainFnRef.current);
     }
@@ -509,7 +471,7 @@ export function useBatchConversation(
     setSpeechDetected(false);
     setPlaybackVolume(0);
     setBatchState("idle");
-  }, [stopSilenceDetection]);
+  }, [stopVad]);
 
   // RAF loop: reads analyser for volume glow while in "playing" state
   useEffect(() => {
@@ -563,7 +525,7 @@ export function useBatchConversation(
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
 
-    stopSilenceDetection(); // clears interval + disconnects micSourceRef/micAnalyserRef
+    stopVad();
 
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
@@ -615,7 +577,7 @@ export function useBatchConversation(
     setSpeechDetected(false);
     setPlaybackVolume(0);
     setBatchState("idle");
-  }, [stopSilenceDetection]);
+  }, [stopVad]);
 
   return {
     batchState,
