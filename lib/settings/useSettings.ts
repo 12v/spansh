@@ -11,7 +11,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   ttsModel: "gpt-4o-mini-tts",
   gptModel: "gpt-4o-mini",
-  listeningMode: false,
+  listeningMode: true,
 };
 
 const STORAGE_KEY = "spansh-settings";

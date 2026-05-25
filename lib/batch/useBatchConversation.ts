@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Persona } from "@/lib/personas/types";
 import type { Settings } from "@/lib/settings/useSettings";
 
-export type BatchState = "idle" | "recording" | "processing" | "error";
+export type BatchState = "idle" | "recording" | "processing" | "playing" | "error";
 
 export interface ConversationMessage {
   role: "user" | "assistant";
@@ -43,8 +43,11 @@ export function useBatchConversation(persona: Persona | null) {
   // decodeChain serialises decoding so chunks always play in arrival order,
   // regardless of how fast each individual decode completes.
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
   const nextStartTimeRef = useRef(0);
   const decodeChainRef = useRef<Promise<void>>(Promise.resolve());
+  const rafRef = useRef<number | null>(null);
+  const [playbackVolume, setPlaybackVolume] = useState(0);
 
   const scheduleAudioChunk = useCallback((base64: string) => {
     const ctx = (audioCtxRef.current ??= new AudioContext());
@@ -56,7 +59,7 @@ export function useBatchConversation(persona: Persona | null) {
         const audioBuffer = await ctx.decodeAudioData(buffer);
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
-        source.connect(ctx.destination);
+        source.connect(analyserRef.current ?? ctx.destination);
         const startAt = Math.max(ctx.currentTime, nextStartTimeRef.current);
         source.start(startAt);
         nextStartTimeRef.current = startAt + audioBuffer.duration;
@@ -151,6 +154,9 @@ export function useBatchConversation(persona: Persona | null) {
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = new AudioContext();
     audioCtxRef.current.resume().catch(() => {});
+    analyserRef.current = audioCtxRef.current.createAnalyser();
+    analyserRef.current.fftSize = 256;
+    analyserRef.current.connect(audioCtxRef.current.destination);
     nextStartTimeRef.current = 0;
     decodeChainRef.current = Promise.resolve();
 
@@ -232,7 +238,10 @@ export function useBatchConversation(persona: Persona | null) {
               ]);
               setCurrentTranscript("");
               setCurrentReply("");
-              setBatchState("idle");
+              {
+                const ctx = audioCtxRef.current;
+                setBatchState(ctx && nextStartTimeRef.current > ctx.currentTime ? "playing" : "idle");
+              }
               break;
             case "error":
               throw new Error(data.message);
@@ -246,8 +255,54 @@ export function useBatchConversation(persona: Persona | null) {
     }
   }, [persona, batchState, scheduleAudioChunk]);
 
+  useEffect(() => {
+    if (batchState !== "playing") {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      setPlaybackVolume(0);
+      return;
+    }
+    const analyser = analyserRef.current;
+    const ctx = audioCtxRef.current;
+    if (!analyser || !ctx) {
+      setBatchState("idle");
+      return;
+    }
+
+    const buf = new Uint8Array(analyser.frequencyBinCount);
+
+    function tick() {
+      analyser!.getByteTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const v = (buf[i] - 128) / 128;
+        sum += v * v;
+      }
+      setPlaybackVolume(Math.min(Math.sqrt(sum / buf.length) * 5, 1));
+      if (ctx!.currentTime >= nextStartTimeRef.current) {
+        setBatchState("idle");
+        return;
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    }
+
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  }, [batchState]);
+
   const reset = useCallback(() => {
     stopSilenceDetection();
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     recorderRef.current = null;
@@ -256,11 +311,13 @@ export function useBatchConversation(persona: Persona | null) {
     decodeChainRef.current = Promise.resolve();
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
+    analyserRef.current = null;
     setMicReady(false);
     setMessages([]);
     setCurrentTranscript("");
     setCurrentReply("");
     setErrorMessage(null);
+    setPlaybackVolume(0);
     setBatchState("idle");
   }, []);
 
@@ -271,6 +328,7 @@ export function useBatchConversation(persona: Persona | null) {
     errorMessage,
     currentTranscript,
     currentReply,
+    playbackVolume,
     prepareMic,
     startRecording,
     cancelRecording,
