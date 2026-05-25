@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Persona } from "@/lib/personas/types";
 import type { Settings } from "@/lib/settings/useSettings";
+import { useVad } from "./useVad";
+import { usePlayback } from "./usePlayback";
 
 export type BatchState = "idle" | "recording" | "processing" | "playing" | "error";
 
@@ -11,26 +13,9 @@ export interface ConversationMessage {
   content: string;
 }
 
-const MSE_MIME = 'audio/ogg; codecs="opus"';
-
-// VAD via ScriptProcessorNode.onaudioprocess — receives PCM frames directly from the
-// audio rendering pipeline. Works on iOS Safari where getFloatTimeDomainData returns
-// zeros for MediaStreamSourceNode (WebKit bug #225564) and where MediaRecorder timeslice
-// is ignored (ondataavailable only fires on stop).
-const SPEECH_THRESHOLD = 0.02;
-const SILENCE_THRESHOLD = 0.01;
-const END_OF_SPEECH_MS = 1500;
-
-function mseSupported(): boolean {
-  return (
-    typeof MediaSource !== "undefined" &&
-    MediaSource.isTypeSupported(MSE_MIME)
-  );
-}
-
 export function useBatchConversation(
   persona: Persona | null,
-  settings: Pick<Settings, "ttsModel" | "gptModel">
+  settings: Pick<Settings, "ttsModel" | "gptModel" | "sttModel">
 ) {
   const [batchState, setBatchState] = useState<BatchState>("idle");
   const [micReady, setMicReady] = useState(false);
@@ -39,63 +24,41 @@ export function useBatchConversation(
   const [currentTranscript, setCurrentTranscript] = useState("");
   const [currentReply, setCurrentReply] = useState("");
   const [conversationActive, setConversationActive] = useState(false);
-  const [speechDetected, setSpeechDetected] = useState(false);
 
-  // Latest-value ref so VAD always reads current settings
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
 
-  // Session-level persistent mic stream (open for the entire conversation session)
   const sessionStreamRef = useRef<MediaStream | null>(null);
-
-  // Per-turn recording refs
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
-
-  // VAD state — driven by ScriptProcessorNode.onaudioprocess
-  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const speechDetectedRef = useRef(false);
-  const silenceSinceRef = useRef<number | null>(null);
-  const vadActiveRef = useRef(false); // false prevents re-entrancy once auto-stop fires
-
-  // Conversation session state (ref copy for use inside async callbacks)
   const conversationActiveRef = useRef(false);
-
-  // Abort controller for in-flight fetch
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Playback — session-scoped AudioContext (created in startConversation for iOS gesture requirement)
+  // AudioContext is session-scoped; must be created synchronously in a gesture handler
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const rafRef = useRef<number | null>(null);
-  const [playbackVolume, setPlaybackVolume] = useState(0);
 
-  // MSE-specific refs
-  const useMseRef = useRef(false);
-  const mediaSourceRef = useRef<MediaSource | null>(null);
-  const sourceBufferRef = useRef<SourceBuffer | null>(null);
-  const audioElRef = useRef<HTMLAudioElement | null>(null);
-  const objectUrlRef = useRef<string | null>(null);
-  const pendingChunksRef = useRef<ArrayBuffer[]>([]);
-  const endOfStreamPendingRef = useRef(false);
-  const drainFnRef = useRef<(() => void) | null>(null);
+  // Screen wake lock — acquired for the duration of an active conversation
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
-  // PCM fallback refs (Safari: stream 24kHz 16-bit mono PCM, schedule synchronously)
-  const pcmLeftoverRef = useRef<number | null>(null);
-  const nextStartTimeRef = useRef(0);
+  // Forward ref for stopAndProcessInternal — needed so useVad can call it before
+  // it's defined (circular dependency: VAD calls stopAndProcess; stopAndProcess needs stopVad)
+  const stopAndProcessRef = useRef<() => void>(() => {});
 
-  const stopVad = useCallback(() => {
-    vadActiveRef.current = false;
-    speechDetectedRef.current = false;
-    silenceSinceRef.current = null;
-    scriptProcessorRef.current?.disconnect();
-    scriptProcessorRef.current = null;
-    micSourceRef.current?.disconnect();
-    micSourceRef.current = null;
-  }, []);
+  const { speechDetected, speechDetectedRef, startVad, stopVad } = useVad(
+    audioCtxRef,
+    () => stopAndProcessRef.current()
+  );
+
+  const {
+    playbackVolume,
+    preparePlayback,
+    initSourceBuffer,
+    handleAudioChunk,
+    finalizeAudioStream,
+    cleanupPlayback,
+  } = usePlayback(audioCtxRef, batchState === "playing", () => setBatchState("idle"));
 
   // Call once when a persona is selected to prompt for mic permission before the
   // first recording, so the permission dialog doesn't interrupt the user speaking.
@@ -111,55 +74,20 @@ export function useBatchConversation(
     }
   }, []);
 
-  // Internal: stop current recorder and send audio to server
   const stopAndProcessInternal = useCallback(() => {
     const recorder = recorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
 
     const hadSpeech = speechDetectedRef.current;
     stopVad();
+    // Mute mic tracks during processing/playback so iOS doesn't duck the AI audio
+    sessionStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = false; });
 
     setBatchState("processing");
     setCurrentTranscript("");
     setCurrentReply("");
 
-    // Set up analyser for playback visualisation (reuses session-scoped AudioContext)
-    if (audioCtxRef.current) {
-      analyserRef.current = audioCtxRef.current.createAnalyser();
-      analyserRef.current.fftSize = 256;
-    }
-
-    const useMse = mseSupported();
-    useMseRef.current = useMse;
-
-    let sourceOpenPromise: Promise<void> | null = null;
-
-    if (useMse && audioCtxRef.current && analyserRef.current) {
-      const ms = new MediaSource();
-      const url = URL.createObjectURL(ms);
-      const audioEl = new Audio();
-      audioEl.src = url;
-
-      sourceOpenPromise = new Promise<void>((resolve) => {
-        ms.addEventListener("sourceopen", () => resolve(), { once: true });
-      });
-
-      const mediaElSrc = audioCtxRef.current.createMediaElementSource(audioEl);
-      mediaElSrc.connect(analyserRef.current);
-      analyserRef.current.connect(audioCtxRef.current.destination);
-
-      audioEl.play().catch(() => {});
-
-      mediaSourceRef.current = ms;
-      audioElRef.current = audioEl;
-      objectUrlRef.current = url;
-      pendingChunksRef.current = [];
-      endOfStreamPendingRef.current = false;
-    } else if (!useMse && analyserRef.current && audioCtxRef.current) {
-      analyserRef.current.connect(audioCtxRef.current.destination);
-      pcmLeftoverRef.current = null;
-      nextStartTimeRef.current = 0;
-    }
+    const { useMse, sourceOpenPromise } = preparePlayback();
 
     (async () => {
       try {
@@ -173,7 +101,6 @@ export function useBatchConversation(
         if (!hadSpeech) {
           chunksRef.current = [];
           setErrorMessage("No se detectó audio. Intenta de nuevo.");
-          setSpeechDetected(false);
           setBatchState("idle");
           return;
         }
@@ -190,28 +117,7 @@ export function useBatchConversation(
 
         if (useMse && sourceOpenPromise) {
           await sourceOpenPromise;
-          const sb = mediaSourceRef.current!.addSourceBuffer(MSE_MIME);
-          sourceBufferRef.current = sb;
-
-          function drain() {
-            const s = sourceBufferRef.current;
-            const ms2 = mediaSourceRef.current;
-            if (!s || s.updating) return;
-            if (pendingChunksRef.current.length > 0) {
-              s.appendBuffer(pendingChunksRef.current.shift()!);
-            } else if (endOfStreamPendingRef.current && ms2?.readyState === "open") {
-              ms2.endOfStream();
-              endOfStreamPendingRef.current = false;
-            }
-          }
-
-          drainFnRef.current = drain;
-          sb.addEventListener("updateend", drain);
-
-          if (audioElRef.current) {
-            audioElRef.current.onended = () => setBatchState("idle");
-            audioElRef.current.onerror = () => setBatchState("idle");
-          }
+          initSourceBuffer(() => setBatchState("idle"));
         }
 
         const abortController = new AbortController();
@@ -223,6 +129,7 @@ export function useBatchConversation(
         formData.append("history", JSON.stringify(messagesRef.current));
         formData.append("ttsModel", settingsRef.current.ttsModel);
         formData.append("gptModel", settingsRef.current.gptModel);
+        formData.append("sttModel", settingsRef.current.sttModel);
         formData.append("audioFormat", useMse ? "opus" : "pcm");
 
         const res = await fetch("/api/process-speech", {
@@ -266,46 +173,9 @@ export function useBatchConversation(
                 finalReply += data.text;
                 break;
 
-              case "audio_chunk": {
-                const raw = atob(data.data);
-                if (useMse) {
-                  const bytes = new Uint8Array(raw.length);
-                  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-                  pendingChunksRef.current.push(bytes.buffer as ArrayBuffer);
-                  drainFnRef.current?.();
-                } else {
-                  // PCM path: 24 kHz, 16-bit signed little-endian, mono.
-                  let pcm = raw;
-                  if (pcmLeftoverRef.current !== null) {
-                    pcm = String.fromCharCode(pcmLeftoverRef.current) + pcm;
-                    pcmLeftoverRef.current = null;
-                  }
-                  if (pcm.length % 2 !== 0) {
-                    pcmLeftoverRef.current = pcm.charCodeAt(pcm.length - 1);
-                    pcm = pcm.slice(0, -1);
-                  }
-                  const sampleCount = pcm.length / 2;
-                  if (sampleCount > 0) {
-                    const ctx = audioCtxRef.current!;
-                    const audioBuffer = ctx.createBuffer(1, sampleCount, 24000);
-                    const ch = audioBuffer.getChannelData(0);
-                    for (let i = 0; i < sampleCount; i++) {
-                      const lo = pcm.charCodeAt(i * 2);
-                      const hi = pcm.charCodeAt(i * 2 + 1);
-                      let s = (hi << 8) | lo;
-                      if (s >= 0x8000) s -= 0x10000;
-                      ch[i] = s / 32768;
-                    }
-                    const source = ctx.createBufferSource();
-                    source.buffer = audioBuffer;
-                    source.connect(analyserRef.current ?? ctx.destination);
-                    const startAt = Math.max(ctx.currentTime, nextStartTimeRef.current);
-                    source.start(startAt);
-                    nextStartTimeRef.current = startAt + audioBuffer.duration;
-                  }
-                }
+              case "audio_chunk":
+                handleAudioChunk(data.data);
                 break;
-              }
 
               case "done": {
                 if (data.transcript) finalTranscript = data.transcript;
@@ -317,15 +187,7 @@ export function useBatchConversation(
                 ]);
                 setCurrentTranscript("");
                 setCurrentReply("");
-
-                if (useMse) {
-                  endOfStreamPendingRef.current = true;
-                  drainFnRef.current?.();
-                  setBatchState("playing");
-                } else {
-                  const ctx = audioCtxRef.current;
-                  setBatchState(ctx && nextStartTimeRef.current > ctx.currentTime ? "playing" : "idle");
-                }
+                setBatchState(finalizeAudioStream());
                 break;
               }
 
@@ -341,59 +203,20 @@ export function useBatchConversation(
         setBatchState("error");
       }
     })();
-  }, [persona, stopVad]);
+  }, [persona, stopVad, preparePlayback, initSourceBuffer, handleAudioChunk, finalizeAudioStream]);
 
-  // Internal: start recording a new turn using the existing session stream.
-  // VAD is driven by MediaRecorder ondataavailable (timeslice mode) — avoids
-  // Web Audio API / AnalyserNode which returns zeros on iOS Safari (WebKit bug #225564).
+  // Keep forward ref current so useVad's onEndOfSpeech always calls the latest version
+  stopAndProcessRef.current = stopAndProcessInternal;
+
   const startRecordingTurn = useCallback(() => {
     if (!conversationActiveRef.current || !sessionStreamRef.current || batchState !== "idle") return;
 
     const stream = sessionStreamRef.current;
-
-    speechDetectedRef.current = false;
-    silenceSinceRef.current = null;
-    vadActiveRef.current = true;
-    setSpeechDetected(false);
     setErrorMessage(null);
+    // Re-enable mic tracks for this recording turn (were muted during processing/playback)
+    stream.getAudioTracks().forEach(t => { t.enabled = true; });
 
-    // ScriptProcessorNode receives PCM frames directly from the audio rendering pipeline.
-    // iOS Safari ignores MediaRecorder timeslice AND has a bug where getFloatTimeDomainData
-    // returns zeros for MediaStreamSourceNode — onaudioprocess is unaffected by both.
-    const ctx = audioCtxRef.current;
-    if (!ctx) return;
-    const scriptProcessor = ctx.createScriptProcessor(2048, 1, 1);
-    const micSource = ctx.createMediaStreamSource(stream);
-    // silentGain(0) → destination: iOS WebKit won't process nodes without a destination path
-    const silentGain = ctx.createGain();
-    silentGain.gain.value = 0;
-    micSource.connect(scriptProcessor);
-    scriptProcessor.connect(silentGain);
-    silentGain.connect(ctx.destination);
-    scriptProcessorRef.current = scriptProcessor;
-    micSourceRef.current = micSource;
-
-    scriptProcessor.onaudioprocess = (event) => {
-      if (!vadActiveRef.current) return;
-      const input = event.inputBuffer.getChannelData(0);
-      let sum = 0;
-      for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
-      const rms = Math.sqrt(sum / input.length);
-
-      if (rms >= SPEECH_THRESHOLD) {
-        if (!speechDetectedRef.current) {
-          speechDetectedRef.current = true;
-          setSpeechDetected(true);
-        }
-        silenceSinceRef.current = null;
-      } else if (rms < SILENCE_THRESHOLD && speechDetectedRef.current) {
-        if (silenceSinceRef.current === null) {
-          silenceSinceRef.current = Date.now();
-        } else if (Date.now() - silenceSinceRef.current >= END_OF_SPEECH_MS) {
-          stopAndProcessInternal();
-        }
-      }
-    };
+    if (!startVad(stream)) return;
 
     const recorder = new MediaRecorder(stream);
     recorderRef.current = recorder;
@@ -403,7 +226,7 @@ export function useBatchConversation(
     };
     recorder.start();
     setBatchState("recording");
-  }, [batchState, stopAndProcessInternal]);
+  }, [batchState, startVad]);
 
   // Auto-restart: when state returns to idle during an active session, start the next turn
   useEffect(() => {
@@ -433,6 +256,9 @@ export function useBatchConversation(
 
       conversationActiveRef.current = true;
       setConversationActive(true);
+      navigator.wakeLock?.request('screen').then(lock => {
+        wakeLockRef.current = lock;
+      }).catch(() => {});
     } catch (err) {
       audioCtxRef.current?.close().catch(() => {});
       audioCtxRef.current = null;
@@ -446,6 +272,9 @@ export function useBatchConversation(
     conversationActiveRef.current = false;
     setConversationActive(false);
 
+    wakeLockRef.current?.release().catch(() => {});
+    wakeLockRef.current = null;
+
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
 
@@ -462,126 +291,38 @@ export function useBatchConversation(
     sessionStreamRef.current?.getTracks().forEach((t) => t.stop());
     sessionStreamRef.current = null;
 
-    if (audioElRef.current) audioElRef.current.pause();
-
-    if (sourceBufferRef.current && drainFnRef.current) {
-      sourceBufferRef.current.removeEventListener("updateend", drainFnRef.current);
-    }
-    if (audioElRef.current) {
-      audioElRef.current.onended = null;
-      audioElRef.current.onerror = null;
-      audioElRef.current.src = "";
-    }
-    if (mediaSourceRef.current?.readyState === "open") {
-      try { mediaSourceRef.current.endOfStream(); } catch { /* already closed */ }
-    }
-    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-    mediaSourceRef.current = null;
-    sourceBufferRef.current = null;
-    audioElRef.current = null;
-    objectUrlRef.current = null;
-    pendingChunksRef.current = [];
-    endOfStreamPendingRef.current = false;
-    drainFnRef.current = null;
-    useMseRef.current = false;
-    pcmLeftoverRef.current = null;
-    nextStartTimeRef.current = 0;
+    cleanupPlayback();
 
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
-    analyserRef.current = null;
 
-    if (rafRef.current !== null) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-
-    setSpeechDetected(false);
-    setPlaybackVolume(0);
     setBatchState("idle");
-  }, [stopVad]);
+  }, [stopVad, cleanupPlayback]);
 
-  // RAF loop: reads analyser for volume glow while in "playing" state
+  // Re-acquire wake lock when the page becomes visible again (OS releases it on page hide)
   useEffect(() => {
-    if (batchState !== "playing") {
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
-      setPlaybackVolume(0);
-      return;
-    }
-    const analyser = analyserRef.current;
-    const ctx = audioCtxRef.current;
-    if (!analyser || !ctx) {
-      setBatchState("idle");
-      return;
-    }
-
-    const buf = new Uint8Array(analyser.frequencyBinCount);
-
-    function tick() {
-      analyser!.getByteTimeDomainData(buf);
-      let sum = 0;
-      for (let i = 0; i < buf.length; i++) {
-        const v = (buf[i] - 128) / 128;
-        sum += v * v;
-      }
-      setPlaybackVolume(Math.min(Math.sqrt(sum / buf.length) * 5, 1));
-
-      if (!useMseRef.current && ctx!.currentTime >= nextStartTimeRef.current) {
-        setBatchState("idle");
-        return;
-      }
-
-      rafRef.current = requestAnimationFrame(tick);
-    }
-
-    rafRef.current = requestAnimationFrame(tick);
-    return () => {
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
+    const reacquire = () => {
+      if (document.visibilityState === 'visible' && conversationActiveRef.current) {
+        navigator.wakeLock?.request('screen').then(lock => {
+          wakeLockRef.current = lock;
+        }).catch(() => {});
       }
     };
-  }, [batchState]);
+    document.addEventListener('visibilitychange', reacquire);
+    return () => document.removeEventListener('visibilitychange', reacquire);
+  }, []);
 
   const reset = useCallback(() => {
     conversationActiveRef.current = false;
     setConversationActive(false);
 
+    wakeLockRef.current?.release().catch(() => {});
+    wakeLockRef.current = null;
+
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
 
     stopVad();
-
-    if (rafRef.current !== null) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-
-    if (sourceBufferRef.current && drainFnRef.current) {
-      sourceBufferRef.current.removeEventListener("updateend", drainFnRef.current);
-    }
-    if (audioElRef.current) {
-      audioElRef.current.pause();
-      audioElRef.current.onended = null;
-      audioElRef.current.onerror = null;
-      audioElRef.current.src = "";
-    }
-    if (mediaSourceRef.current?.readyState === "open") {
-      try { mediaSourceRef.current.endOfStream(); } catch { /* already closed */ }
-    }
-    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-    mediaSourceRef.current = null;
-    sourceBufferRef.current = null;
-    audioElRef.current = null;
-    objectUrlRef.current = null;
-    pendingChunksRef.current = [];
-    pcmLeftoverRef.current = null;
-    endOfStreamPendingRef.current = false;
-    drainFnRef.current = null;
-    useMseRef.current = false;
 
     sessionStreamRef.current?.getTracks().forEach((t) => t.stop());
     sessionStreamRef.current = null;
@@ -593,19 +334,19 @@ export function useBatchConversation(
     }
     recorderRef.current = null;
     chunksRef.current = [];
-    nextStartTimeRef.current = 0;
+
+    cleanupPlayback();
+
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
-    analyserRef.current = null;
+
     setMicReady(false);
     setMessages([]);
     setCurrentTranscript("");
     setCurrentReply("");
     setErrorMessage(null);
-    setSpeechDetected(false);
-    setPlaybackVolume(0);
     setBatchState("idle");
-  }, [stopVad]);
+  }, [stopVad, cleanupPlayback]);
 
   return {
     batchState,
