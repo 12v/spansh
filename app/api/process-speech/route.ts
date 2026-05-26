@@ -47,8 +47,10 @@ export async function POST(req: NextRequest) {
       const gptModel: "gpt-4o-mini" | "gpt-4o" =
         rawGptModel === "gpt-4o" ? "gpt-4o" : "gpt-4o-mini";
 
-      const audioFormat: "opus" | "pcm" =
-        formData.get("audioFormat") === "pcm" ? "pcm" : "opus";
+      const audioFormat: "opus" | "pcm" | "mp3" =
+        formData.get("audioFormat") === "pcm" ? "pcm"
+        : formData.get("audioFormat") === "mp3" ? "mp3"
+        : "opus";
 
       const rawSttModel = formData.get("sttModel") as string | null;
       const sttModel: "gpt-4o-mini-transcribe" | "gpt-4o-transcribe" =

@@ -54,7 +54,6 @@ export function useBatchConversation(
   const {
     playbackVolume,
     preparePlayback,
-    initSourceBuffer,
     handleAudioChunk,
     finalizeAudioStream,
     cleanupPlayback,
@@ -87,7 +86,7 @@ export function useBatchConversation(
     setCurrentTranscript("");
     setCurrentReply("");
 
-    const { useMse, sourceOpenPromise } = preparePlayback();
+    preparePlayback();
 
     (async () => {
       try {
@@ -115,11 +114,6 @@ export function useBatchConversation(
         const blob = new Blob(chunksRef.current, { type: mimeType });
         chunksRef.current = [];
 
-        if (useMse && sourceOpenPromise) {
-          await sourceOpenPromise;
-          initSourceBuffer(() => setBatchState("idle"));
-        }
-
         const abortController = new AbortController();
         abortControllerRef.current = abortController;
 
@@ -130,7 +124,7 @@ export function useBatchConversation(
         formData.append("ttsModel", settingsRef.current.ttsModel);
         formData.append("gptModel", settingsRef.current.gptModel);
         formData.append("sttModel", settingsRef.current.sttModel);
-        formData.append("audioFormat", useMse ? "opus" : "pcm");
+        formData.append("audioFormat", "mp3");
 
         const res = await fetch("/api/process-speech", {
           method: "POST",
@@ -203,7 +197,7 @@ export function useBatchConversation(
         setBatchState("error");
       }
     })();
-  }, [persona, stopVad, preparePlayback, initSourceBuffer, handleAudioChunk, finalizeAudioStream]);
+  }, [persona, stopVad, preparePlayback, handleAudioChunk, finalizeAudioStream]);
 
   // Keep forward ref current so useVad's onEndOfSpeech always calls the latest version
   stopAndProcessRef.current = stopAndProcessInternal;
