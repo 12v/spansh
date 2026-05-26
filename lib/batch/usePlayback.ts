@@ -2,9 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+// Frames to prepend as decoder context so the bit-reservoir and encoder delay
+// don't affect the new frames. We discard the decoded context audio afterwards.
+const CONTEXT_FRAMES = 2;
 const FRAMES_PER_DECODE = 4;
 
-// Returns the byte length of the MP3 frame starting at buf[offset], or null if not a valid header.
+// Returns byte length of the MP3 frame at buf[offset], or null if not a valid header.
 function mp3FrameLength(buf: Uint8Array, offset: number): number | null {
   if (offset + 4 > buf.length) return null;
   if (buf[offset] !== 0xFF || (buf[offset + 1] & 0xE0) !== 0xE0) return null;
@@ -31,9 +34,18 @@ function mp3FrameLength(buf: Uint8Array, offset: number): number | null {
 
   if (!bitrate || !sampleRate) return null;
 
-  // Layer 1 has a different frame size formula
-  if (layer === 3) return Math.floor(12 * bitrate / sampleRate + padding) * 4;
-  return Math.floor(144 * bitrate / sampleRate) + padding;
+  if (layer === 3) return Math.floor(12 * bitrate / sampleRate + padding) * 4; // Layer 1
+  return Math.floor(144 * bitrate / sampleRate) + padding; // Layer 2/3
+}
+
+// Samples per frame: MPEG1 Layer3 = 1152, MPEG2/2.5 Layer3 = 576.
+function mp3SamplesPerFrame(frame: Uint8Array): number {
+  if (frame.length < 2) return 1152;
+  const version = (frame[1] >> 3) & 3;
+  const layer   = (frame[1] >> 1) & 3;
+  if (layer === 3) return 384; // Layer 1
+  if (layer === 2) return 1152; // Layer 2
+  return version === 3 ? 1152 : 576; // Layer 3: MPEG1 vs MPEG2/2.5
 }
 
 export function usePlayback(
@@ -48,6 +60,8 @@ export function usePlayback(
   const nextStartTimeRef  = useRef(0);
   const byteBufferRef     = useRef<Uint8Array>(new Uint8Array(0));
   const pendingFramesRef  = useRef<Uint8Array[]>([]);
+  const contextFramesRef  = useRef<Uint8Array[]>([]);
+  const spfRef            = useRef(1152); // samples per frame, detected from first frame
   const decodeQueueRef    = useRef<Promise<void>>(Promise.resolve());
   const pendingDecodesRef = useRef(0);
 
@@ -99,27 +113,48 @@ export function usePlayback(
     };
   }, [isPlaying]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Chains decoded audio onto a sequential promise queue so frames play in order.
+  // Decode `frames` with preceding context so the MP3 decoder has state.
+  // Keep only the last `frames.length * spf` samples — this naturally discards
+  // both the context audio and any encoder-delay silence prepended by the browser.
   const decodeAndSchedule = useCallback((frames: Uint8Array[]) => {
     if (!frames.length) return;
     pendingDecodesRef.current++;
 
-    const total = frames.reduce((n, f) => n + f.length, 0);
+    // Capture and update context synchronously so back-to-back calls stay ordered.
+    const contextFrames = contextFramesRef.current;
+    contextFramesRef.current = frames.slice(-CONTEXT_FRAMES);
+
+    const allFrames = [...contextFrames, ...frames];
+    const total = allFrames.reduce((n, f) => n + f.length, 0);
     const combined = new Uint8Array(total);
     let off = 0;
-    for (const f of frames) { combined.set(f, off); off += f.length; }
+    for (const f of allFrames) { combined.set(f, off); off += f.length; }
+
+    const keepSamples = frames.length * spfRef.current;
 
     decodeQueueRef.current = decodeQueueRef.current.then(async () => {
       const ctx = audioCtxRef.current;
       if (!ctx) { pendingDecodesRef.current--; return; }
       try {
-        const decoded = await ctx.decodeAudioData(combined.buffer.slice(0, combined.byteLength));
+        const decoded = await ctx.decodeAudioData(combined.buffer);
+
+        // Taking the last `keepSamples` discards context audio and any encoder-delay
+        // silence the browser prepends, giving clean audio for exactly `frames`.
+        const startSample = Math.max(0, decoded.length - keepSamples);
+        const newLength = decoded.length - startSample;
+        if (newLength <= 0) return;
+
+        const trimmed = ctx.createBuffer(decoded.numberOfChannels, newLength, decoded.sampleRate);
+        for (let ch = 0; ch < decoded.numberOfChannels; ch++) {
+          trimmed.getChannelData(ch).set(decoded.getChannelData(ch).subarray(startSample));
+        }
+
         const source = ctx.createBufferSource();
-        source.buffer = decoded;
+        source.buffer = trimmed;
         source.connect(analyserRef.current ?? ctx.destination);
         const startAt = Math.max(ctx.currentTime, nextStartTimeRef.current);
         source.start(startAt);
-        nextStartTimeRef.current = startAt + decoded.duration;
+        nextStartTimeRef.current = startAt + trimmed.duration;
       } catch {
         // ignore individual batch decode errors
       } finally {
@@ -138,6 +173,8 @@ export function usePlayback(
     }
     byteBufferRef.current = new Uint8Array(0);
     pendingFramesRef.current = [];
+    contextFramesRef.current = [];
+    spfRef.current = 1152;
     decodeQueueRef.current = Promise.resolve();
     pendingDecodesRef.current = 0;
     nextStartTimeRef.current = 0;
@@ -149,14 +186,12 @@ export function usePlayback(
     const incoming = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) incoming[i] = raw.charCodeAt(i);
 
-    // Append to rolling buffer
     const prev = byteBufferRef.current;
     const next = new Uint8Array(prev.length + incoming.length);
     next.set(prev);
     next.set(incoming, prev.length);
     byteBufferRef.current = next;
 
-    // Extract and batch complete frames
     let pos = 0;
     const buf = byteBufferRef.current;
     while (pos < buf.length) {
@@ -168,7 +203,11 @@ export function usePlayback(
       if (frameLen === null) { pos++; continue; }
       if (pos + frameLen > buf.length) break;
 
-      pendingFramesRef.current.push(buf.slice(pos, pos + frameLen));
+      const frame = buf.slice(pos, pos + frameLen);
+      if (pendingFramesRef.current.length === 0) {
+        spfRef.current = mp3SamplesPerFrame(frame);
+      }
+      pendingFramesRef.current.push(frame);
       pos += frameLen;
 
       if (pendingFramesRef.current.length >= FRAMES_PER_DECODE) {
@@ -184,8 +223,9 @@ export function usePlayback(
       decodeAndSchedule(pendingFramesRef.current.splice(0));
     }
     const ctx = audioCtxRef.current;
-    const hasWork = pendingDecodesRef.current > 0 || nextStartTimeRef.current > (ctx?.currentTime ?? 0);
-    return hasWork ? "playing" : "idle";
+    return pendingDecodesRef.current > 0 || nextStartTimeRef.current > (ctx?.currentTime ?? 0)
+      ? "playing"
+      : "idle";
   }, [audioCtxRef, decodeAndSchedule]);
 
   // Full teardown
@@ -198,6 +238,7 @@ export function usePlayback(
     pendingDecodesRef.current = 0;
     byteBufferRef.current = new Uint8Array(0);
     pendingFramesRef.current = [];
+    contextFramesRef.current = [];
     nextStartTimeRef.current = 0;
     analyserRef.current = null;
     setPlaybackVolume(0);
