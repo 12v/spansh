@@ -124,7 +124,7 @@ export function useBatchConversation(
         formData.append("ttsModel", settingsRef.current.ttsModel);
         formData.append("gptModel", settingsRef.current.gptModel);
         formData.append("sttModel", settingsRef.current.sttModel);
-        formData.append("audioFormat", "mp3");
+        formData.append("audioFormat", "pcm");
 
         const res = await fetch("/api/process-speech", {
           method: "POST",
