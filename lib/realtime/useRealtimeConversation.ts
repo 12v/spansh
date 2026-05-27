@@ -33,6 +33,7 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
   const [sessionCost, setSessionCost] = useState(0);
 
   const sessionRef = useRef<RealtimeSession | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -89,6 +90,11 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
     sessionRef.current?.close();
     sessionRef.current = null;
 
+    // Stop mic tracks explicitly — the SDK stops them via RTCPeerConnection
+    // senders on close(), but if the session never connected we'd leak the stream.
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
+
     analyserRef.current?.disconnect();
     analyserRef.current = null;
 
@@ -135,7 +141,21 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
     analyserRef.current = analyser;
 
     try {
-      // 1. Fetch ephemeral client secret
+      // 1. Acquire microphone with explicit constraints before any network calls.
+      //    - echoCancellation: prevents model audio leaking back into the mic (barge-in false positives)
+      //    - noiseSuppression: reduces background noise that could trip the VAD
+      //    - autoGainControl:  disabled — AGC can cause sudden level spikes that look like speech
+      //    We pass the stream to the transport so the SDK skips its own getUserMedia call.
+      const micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: false,
+        },
+      });
+      micStreamRef.current = micStream;
+
+      // 2. Fetch ephemeral client secret
       const tokenRes = await fetch(
         `/api/realtime?personaId=${encodeURIComponent(persona.id)}`
       );
@@ -147,7 +167,7 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
       const token: string = data.client_secret?.value;
       if (!token) throw new Error(`No token in response: ${JSON.stringify(data)}`);
 
-      // 2. Build the persona agent
+      // 3. Build the persona agent
       const instructions = [
         "Keep responses brief — 1 to 3 sentences. Be natural and conversational, not terse. If the topic genuinely warrants more, stay concise.",
         persona.systemPrompt,
@@ -162,11 +182,13 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
         voice: persona.voice,
       });
 
-      // 3. Custom WebRTC transport: override pc.ontrack to route remote audio
-      //    through Web Audio API (iOS silent-switch bypass + volume-glow analyser).
+      // 4. Custom WebRTC transport: pass our mic stream so the SDK skips its own
+      //    getUserMedia call, and override pc.ontrack to route remote audio through
+      //    Web Audio API (iOS silent-switch bypass + volume-glow analyser).
       //    The SDK sets pc.ontrack before calling changePeerConnection, so
       //    reassigning it here replaces the SDK's default <audio> playback path.
       const transport = new OpenAIRealtimeWebRTC({
+        mediaStream: micStream,
         changePeerConnection: async (pc) => {
           pc.ontrack = (event) => {
             const ctx = audioCtxRef.current;
@@ -178,7 +200,7 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
         },
       });
 
-      // 4. Create session — transcription disabled (no text display needed)
+      // 5. Create session — transcription disabled (no text display needed)
       const session = new RealtimeSession(agent, {
         transport,
         model: "gpt-realtime-mini",
@@ -199,7 +221,7 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
       });
       sessionRef.current = session;
 
-      // 5. Wire events
+      // 6. Wire events
 
       session.on("transport_event", (event) => {
         const e = event as { type: string; response?: { usage?: UsageData } };
@@ -237,7 +259,7 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
         setConnectionState("error");
       });
 
-      // 6. Connect — SDK handles getUserMedia, RTCPeerConnection, SDP exchange,
+      // 7. Connect — SDK handles RTCPeerConnection, SDP exchange,
       //    session.update with agent instructions + VAD config.
       await session.connect({ apiKey: token });
 
