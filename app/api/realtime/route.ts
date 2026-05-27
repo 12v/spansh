@@ -1,12 +1,10 @@
 import { NextRequest } from "next/server";
-import OpenAI from "openai";
 import { getPersonaById } from "@/lib/personas";
 
 export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
   try {
-    const openai = new OpenAI();
     const personaId = req.nextUrl.searchParams.get("personaId");
 
     if (!personaId) {
@@ -18,14 +16,29 @@ export async function GET(req: NextRequest) {
       return Response.json({ error: `Unknown persona: ${personaId}` }, { status: 400 });
     }
 
-    // openai.beta.realtime.sessions.create() → POST /realtime/sessions
-    // (same endpoint as client.realtime.sessions.create() in newer SDK versions)
-    // Returns session.client_secret.value used as Bearer in the SDP exchange.
-    const session = await openai.beta.realtime.sessions.create({
-      model: "gpt-realtime-mini" as "gpt-4o-mini-realtime-preview",
-      voice: persona.voice,
+    // Direct fetch — no SDK, no OpenAI-Beta header injected by the beta namespace.
+    // POST /v1/realtime/sessions is the GA session creation endpoint.
+    // Returns session.client_secret.value used as the Bearer token in the SDP exchange.
+    const res = await fetch("https://api.openai.com/v1/realtime/sessions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-realtime-mini",
+        voice: persona.voice,
+      }),
     });
 
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const msg = err?.error?.message ?? `OpenAI ${res.status}`;
+      console.error("[api/realtime]", msg);
+      return Response.json({ error: msg }, { status: res.status });
+    }
+
+    const session = await res.json();
     return Response.json(session);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
