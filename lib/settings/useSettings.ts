@@ -7,11 +7,28 @@ export interface Settings {
   vadThreshold: number;
   /** Silence duration in ms before the model responds. */
   vadSilenceDurationMs: number;
+  /** Show a running cost estimate for the current session on-screen. */
+  showCost: boolean;
+  /**
+   * Server-side noise reduction applied before VAD processing.
+   * 'near_field' — headphones or mic close to mouth (most common).
+   * 'far_field' — laptop mic or speakerphone.
+   * null — disabled.
+   */
+  noiseReduction: "near_field" | "far_field" | null;
+  /**
+   * Auto-stop the session after this many ms of no speech activity.
+   * 0 = never auto-stop.
+   */
+  idleTimeoutMs: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   vadThreshold: 0.5,
   vadSilenceDurationMs: 800,
+  showCost: false,
+  noiseReduction: "near_field",
+  idleTimeoutMs: 5 * 60 * 1000, // 5 minutes
 };
 
 const STORAGE_KEY = "spansh-settings";

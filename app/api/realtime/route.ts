@@ -4,9 +4,16 @@ import { getPersonaById } from "@/lib/personas";
 
 export const runtime = "nodejs";
 
+// Lazy singleton — instantiated on first request so the module-level code never
+// runs at Next.js build time when OPENAI_API_KEY is absent.
+let openai: OpenAI | null = null;
+function getOpenAI(): OpenAI {
+  if (!openai) openai = new OpenAI();
+  return openai;
+}
+
 export async function GET(req: NextRequest) {
   try {
-    const openai = new OpenAI();
     const personaId = req.nextUrl.searchParams.get("personaId");
 
     if (!personaId) {
@@ -21,7 +28,7 @@ export async function GET(req: NextRequest) {
     // openai.realtime.clientSecrets.create() → POST /v1/realtime/client_secrets
     // This is the GA endpoint (no OpenAI-Beta header).
     // Returns { value: "ek_…", expires_at, session } — value is the ephemeral bearer token.
-    const secret = await openai.realtime.clientSecrets.create({
+    const secret = await getOpenAI().realtime.clientSecrets.create({
       session: {
         type: "realtime",
         model: "gpt-realtime-mini",

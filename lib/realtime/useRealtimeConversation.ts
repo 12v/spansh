@@ -11,23 +11,34 @@ import { DEFAULT_SETTINGS, type Settings } from "@/lib/settings/useSettings";
 
 export type ConnectionState = "idle" | "connecting" | "active" | "error";
 
+// ── gpt-realtime-mini pricing (USD per token, as of 2025-05) ──────────────────
+// https://openai.com/api/pricing
+const PRICE_AUDIO_INPUT_PER_TOKEN  = 10e-6;   // $10 / 1M audio input tokens
+const PRICE_AUDIO_OUTPUT_PER_TOKEN = 20e-6;   // $20 / 1M audio output tokens
+const PRICE_TEXT_INPUT_PER_TOKEN   = 0.6e-6;  // $0.60 / 1M text input tokens
+const PRICE_TEXT_OUTPUT_PER_TOKEN  = 2.4e-6;  // $2.40 / 1M text output tokens
+
 export function useRealtimeConversation(persona: Persona | null, settings: Settings = DEFAULT_SETTINGS) {
   // Keep a ref so startConversation always reads the latest values without
   // being invalidated (and tearing down an active session) on each slider move.
   const settingsRef = useRef(settings);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
+
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [conversationActive, setConversationActive] = useState(false);
   const [speechDetected, setSpeechDetected] = useState(false);
   const [isModelSpeaking, setIsModelSpeaking] = useState(false);
   const [playbackVolume, setPlaybackVolume] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [sessionCost, setSessionCost] = useState(0);
 
   const sessionRef = useRef<RealtimeSession | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef<number | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const conversationActiveRef = useRef(false);
 
   // ── RAF loop for playback volume glow ─────────────────────────────────────
@@ -74,11 +85,21 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
   const teardown = useCallback(() => {
     stopRaf();
 
+    if (idleTimerRef.current !== null) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+
     wakeLockRef.current?.release().catch(() => {});
     wakeLockRef.current = null;
 
     sessionRef.current?.close();
     sessionRef.current = null;
+
+    // Stop mic tracks explicitly — the SDK stops them via RTCPeerConnection
+    // senders on close(), but if the session never connected we'd leak the stream.
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
 
     analyserRef.current?.disconnect();
     analyserRef.current = null;
@@ -87,11 +108,43 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
     audioCtxRef.current = null;
   }, [stopRaf]);
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => { teardown(); };
+  }, [teardown]);
+
+  // ── Shared deactivate logic ────────────────────────────────────────────────
+
+  const deactivate = useCallback((clearError: boolean) => {
+    conversationActiveRef.current = false;
+    setConversationActive(false);
+    setSpeechDetected(false);
+    setIsModelSpeaking(false);
+    teardown();
+    setConnectionState("idle");
+    if (clearError) setErrorMessage(null);
+  }, [teardown]);
+
+  // ── Idle auto-stop ────────────────────────────────────────────────────────
+  // Resets on every speech_started / audio_start; fires deactivate() when the
+  // configured quiet period expires. Prevents billing if the user walks away.
+
+  const resetIdleTimer = useCallback(() => {
+    if (idleTimerRef.current !== null) clearTimeout(idleTimerRef.current);
+    const ms = settingsRef.current.idleTimeoutMs;
+    if (ms > 0) {
+      idleTimerRef.current = setTimeout(() => {
+        if (conversationActiveRef.current) deactivate(false);
+      }, ms);
+    }
+  }, [deactivate]);
+
   // ── startConversation ──────────────────────────────────────────────────────
 
   const startConversation = useCallback(async () => {
     if (!persona || conversationActiveRef.current) return;
     setErrorMessage(null);
+    setSessionCost(0);
     setConnectionState("connecting");
 
     // Create AudioContext synchronously inside the gesture handler —
@@ -108,7 +161,21 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
     analyserRef.current = analyser;
 
     try {
-      // 1. Fetch ephemeral client secret
+      // 1. Acquire microphone with explicit constraints before any network calls.
+      //    - echoCancellation: prevents model audio leaking back into the mic (barge-in false positives)
+      //    - noiseSuppression: reduces background noise that could trip the VAD
+      //    - autoGainControl:  disabled — AGC can cause sudden level spikes that look like speech
+      //    We pass the stream to the transport so the SDK skips its own getUserMedia call.
+      const micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: false,
+        },
+      });
+      micStreamRef.current = micStream;
+
+      // 2. Fetch ephemeral client secret
       const tokenRes = await fetch(
         `/api/realtime?personaId=${encodeURIComponent(persona.id)}`
       );
@@ -120,7 +187,7 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
       const token: string = data.client_secret?.value;
       if (!token) throw new Error(`No token in response: ${JSON.stringify(data)}`);
 
-      // 2. Build the persona agent
+      // 3. Build the persona agent
       const instructions = [
         "Keep responses brief — 1 to 3 sentences. Be natural and conversational, not terse. If the topic genuinely warrants more, stay concise.",
         persona.systemPrompt,
@@ -135,11 +202,13 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
         voice: persona.voice,
       });
 
-      // 3. Custom WebRTC transport: override pc.ontrack to route remote audio
-      //    through Web Audio API (iOS silent-switch bypass + volume-glow analyser).
+      // 4. Custom WebRTC transport: pass our mic stream so the SDK skips its own
+      //    getUserMedia call, and override pc.ontrack to route remote audio through
+      //    Web Audio API (iOS silent-switch bypass + volume-glow analyser).
       //    The SDK sets pc.ontrack before calling changePeerConnection, so
       //    reassigning it here replaces the SDK's default <audio> playback path.
       const transport = new OpenAIRealtimeWebRTC({
+        mediaStream: micStream,
         changePeerConnection: async (pc) => {
           pc.ontrack = (event) => {
             const ctx = audioCtxRef.current;
@@ -151,7 +220,8 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
         },
       });
 
-      // 4. Create session — transcription disabled (no text display needed)
+      // 5. Create session — transcription disabled (no text display needed)
+      const noiseReduction = settingsRef.current.noiseReduction;
       const session = new RealtimeSession(agent, {
         transport,
         model: "gpt-realtime-mini",
@@ -159,6 +229,9 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
         config: {
           audio: {
             input: {
+              // Server-side noise reduction runs before VAD, reducing spurious
+              // speech detections from background noise.
+              noiseReduction: noiseReduction ? { type: noiseReduction } : null,
               transcription: null,
               turnDetection: {
                 type: "server_vad",
@@ -172,22 +245,35 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
       });
       sessionRef.current = session;
 
-      // 5. Wire events
+      // 6. Wire events
 
-      // VAD signals — drive button colour
       session.on("transport_event", (event) => {
-        const e = event as { type: string };
+        const e = event as { type: string; response?: { usage?: UsageData } };
+
+        // VAD signals — drive button colour + reset idle timer
         if (e.type === "input_audio_buffer.speech_started") {
           setSpeechDetected(true);
           setErrorMessage(null);
+          resetIdleTimer();
         }
         if (e.type === "input_audio_buffer.speech_stopped") {
           setSpeechDetected(false);
         }
+
+        // Cost tracking — accumulate after every model response
+        if (e.type === "response.done" && e.response?.usage) {
+          const u = e.response.usage;
+          const cost =
+            (u.input_token_details?.audio_tokens  ?? 0) * PRICE_AUDIO_INPUT_PER_TOKEN  +
+            (u.output_token_details?.audio_tokens ?? 0) * PRICE_AUDIO_OUTPUT_PER_TOKEN +
+            (u.input_token_details?.text_tokens   ?? 0) * PRICE_TEXT_INPUT_PER_TOKEN   +
+            (u.output_token_details?.text_tokens  ?? 0) * PRICE_TEXT_OUTPUT_PER_TOKEN;
+          setSessionCost((prev) => prev + cost);
+        }
       });
 
-      // Model audio signals — drive glow
-      session.on("audio_start",       () => setIsModelSpeaking(true));
+      // Model audio signals — drive glow + reset idle timer
+      session.on("audio_start",       () => { setIsModelSpeaking(true); resetIdleTimer(); });
       session.on("audio_stopped",     () => setIsModelSpeaking(false));
       session.on("audio_interrupted", () => setIsModelSpeaking(false));
 
@@ -198,13 +284,14 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
         setConnectionState("error");
       });
 
-      // 6. Connect — SDK handles getUserMedia, RTCPeerConnection, SDP exchange,
+      // 7. Connect — SDK handles RTCPeerConnection, SDP exchange,
       //    session.update with agent instructions + VAD config.
       await session.connect({ apiKey: token });
 
       conversationActiveRef.current = true;
       setConversationActive(true);
       setConnectionState("active");
+      resetIdleTimer();
 
       navigator.wakeLock
         ?.request("screen")
@@ -217,28 +304,15 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
       setErrorMessage(msg);
       setConnectionState("error");
     }
-  }, [persona, teardown]);
+  }, [persona, teardown, resetIdleTimer]);
 
   // ── stopConversation / reset ───────────────────────────────────────────────
 
-  const stopConversation = useCallback(() => {
-    conversationActiveRef.current = false;
-    setConversationActive(false);
-    setSpeechDetected(false);
-    setIsModelSpeaking(false);
-    teardown();
-    setConnectionState("idle");
-  }, [teardown]);
-
+  const stopConversation = useCallback(() => deactivate(false), [deactivate]);
   const reset = useCallback(() => {
-    conversationActiveRef.current = false;
-    setConversationActive(false);
-    setSpeechDetected(false);
-    setIsModelSpeaking(false);
-    teardown();
-    setErrorMessage(null);
-    setConnectionState("idle");
-  }, [teardown]);
+    deactivate(true);
+    setSessionCost(0);
+  }, [deactivate]);
 
   // Re-acquire wake lock when the page becomes visible
   useEffect(() => {
@@ -261,8 +335,23 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
     isModelSpeaking,
     playbackVolume,
     errorMessage,
+    sessionCost,
     startConversation,
     stopConversation,
     reset,
   };
+}
+
+// ── Local types for usage payload ─────────────────────────────────────────────
+
+interface TokenDetails {
+  audio_tokens?: number;
+  text_tokens?: number;
+  cached_tokens?: number;
+}
+
+interface UsageData {
+  input_token_details?: TokenDetails;
+  output_token_details?: TokenDetails;
+  total_tokens?: number;
 }

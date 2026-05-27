@@ -10,6 +10,14 @@ interface SettingsPanelProps {
   onClose: () => void;
 }
 
+const IDLE_OPTIONS: { label: string; value: number }[] = [
+  { label: "1 min",  value: 60_000 },
+  { label: "3 min",  value: 3 * 60_000 },
+  { label: "5 min",  value: 5 * 60_000 },
+  { label: "10 min", value: 10 * 60_000 },
+  { label: "Never",  value: 0 },
+];
+
 export function SettingsPanel({ settings, onUpdate, onClose }: SettingsPanelProps) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -76,6 +84,74 @@ export function SettingsPanel({ settings, onUpdate, onClose }: SettingsPanelProp
             onChange={(e) => onUpdate("vadSilenceDurationMs", parseInt(e.target.value, 10))}
             className="w-full accent-indigo-500"
           />
+        </div>
+
+        {/* Server-side noise reduction */}
+        <div className="space-y-2">
+          <div>
+            <p className="text-white text-sm font-medium">Reducción de ruido</p>
+            <p className="text-gray-500 text-xs">Server-side filtering before speech detection</p>
+          </div>
+          <div className="flex gap-2">
+            {(["near_field", "far_field", null] as const).map((v) => (
+              <button
+                key={String(v)}
+                onClick={() => onUpdate("noiseReduction", v)}
+                className={`flex-1 rounded-lg py-1.5 text-xs transition-colors ${
+                  settings.noiseReduction === v
+                    ? "bg-indigo-600 text-white"
+                    : "bg-gray-800 text-gray-400 hover:text-white"
+                }`}
+              >
+                {v === "near_field" ? "Headphones" : v === "far_field" ? "Speaker" : "Off"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Idle auto-stop */}
+        <div className="space-y-2">
+          <div>
+            <p className="text-white text-sm font-medium">Auto-stop por inactividad</p>
+            <p className="text-gray-500 text-xs">End session after this long with no speech</p>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            {IDLE_OPTIONS.map(({ label, value }) => (
+              <button
+                key={value}
+                onClick={() => onUpdate("idleTimeoutMs", value)}
+                className={`rounded-lg px-3 py-1.5 text-xs transition-colors ${
+                  settings.idleTimeoutMs === value
+                    ? "bg-indigo-600 text-white"
+                    : "bg-gray-800 text-gray-400 hover:text-white"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Show cost toggle */}
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-white text-sm font-medium">Mostrar coste estimado</p>
+            <p className="text-gray-500 text-xs">Live USD cost for the current session</p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={settings.showCost}
+            onClick={() => onUpdate("showCost", !settings.showCost)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
+              settings.showCost ? "bg-indigo-600" : "bg-gray-700"
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                settings.showCost ? "translate-x-6" : "translate-x-1"
+              }`}
+            />
+          </button>
         </div>
       </div>
     </div>
