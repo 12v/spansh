@@ -38,6 +38,7 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef<number | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const conversationActiveRef = useRef(false);
 
   // ── RAF loop for playback volume glow ─────────────────────────────────────
@@ -84,6 +85,11 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
   const teardown = useCallback(() => {
     stopRaf();
 
+    if (idleTimerRef.current !== null) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+
     wakeLockRef.current?.release().catch(() => {});
     wakeLockRef.current = null;
 
@@ -118,6 +124,20 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
     setConnectionState("idle");
     if (clearError) setErrorMessage(null);
   }, [teardown]);
+
+  // ── Idle auto-stop ────────────────────────────────────────────────────────
+  // Resets on every speech_started / audio_start; fires deactivate() when the
+  // configured quiet period expires. Prevents billing if the user walks away.
+
+  const resetIdleTimer = useCallback(() => {
+    if (idleTimerRef.current !== null) clearTimeout(idleTimerRef.current);
+    const ms = settingsRef.current.idleTimeoutMs;
+    if (ms > 0) {
+      idleTimerRef.current = setTimeout(() => {
+        if (conversationActiveRef.current) deactivate(false);
+      }, ms);
+    }
+  }, [deactivate]);
 
   // ── startConversation ──────────────────────────────────────────────────────
 
@@ -201,6 +221,7 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
       });
 
       // 5. Create session — transcription disabled (no text display needed)
+      const noiseReduction = settingsRef.current.noiseReduction;
       const session = new RealtimeSession(agent, {
         transport,
         model: "gpt-realtime-mini",
@@ -208,6 +229,9 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
         config: {
           audio: {
             input: {
+              // Server-side noise reduction runs before VAD, reducing spurious
+              // speech detections from background noise.
+              noiseReduction: noiseReduction ? { type: noiseReduction } : null,
               transcription: null,
               turnDetection: {
                 type: "server_vad",
@@ -226,10 +250,11 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
       session.on("transport_event", (event) => {
         const e = event as { type: string; response?: { usage?: UsageData } };
 
-        // VAD signals — drive button colour
+        // VAD signals — drive button colour + reset idle timer
         if (e.type === "input_audio_buffer.speech_started") {
           setSpeechDetected(true);
           setErrorMessage(null);
+          resetIdleTimer();
         }
         if (e.type === "input_audio_buffer.speech_stopped") {
           setSpeechDetected(false);
@@ -247,8 +272,8 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
         }
       });
 
-      // Model audio signals — drive glow
-      session.on("audio_start",       () => setIsModelSpeaking(true));
+      // Model audio signals — drive glow + reset idle timer
+      session.on("audio_start",       () => { setIsModelSpeaking(true); resetIdleTimer(); });
       session.on("audio_stopped",     () => setIsModelSpeaking(false));
       session.on("audio_interrupted", () => setIsModelSpeaking(false));
 
@@ -266,6 +291,7 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
       conversationActiveRef.current = true;
       setConversationActive(true);
       setConnectionState("active");
+      resetIdleTimer();
 
       navigator.wakeLock
         ?.request("screen")
@@ -278,7 +304,7 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
       setErrorMessage(msg);
       setConnectionState("error");
     }
-  }, [persona, teardown]);
+  }, [persona, teardown, resetIdleTimer]);
 
   // ── stopConversation / reset ───────────────────────────────────────────────
 
