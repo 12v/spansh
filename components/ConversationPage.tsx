@@ -26,6 +26,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     isModelSpeaking,
     playbackVolume,
     errorMessage,
+    sessionCost,
     startConversation,
     stopConversation,
     reset,
@@ -152,6 +153,13 @@ export function ConversationPage({ personas }: ConversationPageProps) {
                 {statusText}
               </p>
             </div>
+
+            {/* Session cost */}
+            {settings.showCost && (sessionCost > 0 || conversationActive) && (
+              <p className="text-xs text-gray-600 tabular-nums">
+                ~${sessionCost.toFixed(4)}
+              </p>
+            )}
 
             {/* Error */}
             {errorMessage && (

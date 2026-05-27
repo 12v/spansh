@@ -7,11 +7,14 @@ export interface Settings {
   vadThreshold: number;
   /** Silence duration in ms before the model responds. */
   vadSilenceDurationMs: number;
+  /** Show a running cost estimate for the current session on-screen. */
+  showCost: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   vadThreshold: 0.5,
   vadSilenceDurationMs: 800,
+  showCost: false,
 };
 
 const STORAGE_KEY = "spansh-settings";

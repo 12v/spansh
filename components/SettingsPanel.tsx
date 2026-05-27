@@ -77,6 +77,28 @@ export function SettingsPanel({ settings, onUpdate, onClose }: SettingsPanelProp
             className="w-full accent-indigo-500"
           />
         </div>
+
+        {/* Show cost toggle */}
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-white text-sm font-medium">Mostrar coste estimado</p>
+            <p className="text-gray-500 text-xs">Live USD cost for the current session</p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={settings.showCost}
+            onClick={() => onUpdate("showCost", !settings.showCost)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
+              settings.showCost ? "bg-indigo-600" : "bg-gray-700"
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                settings.showCost ? "translate-x-6" : "translate-x-1"
+              }`}
+            />
+          </button>
+        </div>
       </div>
     </div>
   );

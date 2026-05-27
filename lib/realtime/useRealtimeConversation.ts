@@ -11,17 +11,26 @@ import { DEFAULT_SETTINGS, type Settings } from "@/lib/settings/useSettings";
 
 export type ConnectionState = "idle" | "connecting" | "active" | "error";
 
+// ── gpt-realtime-mini pricing (USD per token, as of 2025-05) ──────────────────
+// https://openai.com/api/pricing
+const PRICE_AUDIO_INPUT_PER_TOKEN  = 10e-6;   // $10 / 1M audio input tokens
+const PRICE_AUDIO_OUTPUT_PER_TOKEN = 20e-6;   // $20 / 1M audio output tokens
+const PRICE_TEXT_INPUT_PER_TOKEN   = 0.6e-6;  // $0.60 / 1M text input tokens
+const PRICE_TEXT_OUTPUT_PER_TOKEN  = 2.4e-6;  // $2.40 / 1M text output tokens
+
 export function useRealtimeConversation(persona: Persona | null, settings: Settings = DEFAULT_SETTINGS) {
   // Keep a ref so startConversation always reads the latest values without
   // being invalidated (and tearing down an active session) on each slider move.
   const settingsRef = useRef(settings);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
+
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [conversationActive, setConversationActive] = useState(false);
   const [speechDetected, setSpeechDetected] = useState(false);
   const [isModelSpeaking, setIsModelSpeaking] = useState(false);
   const [playbackVolume, setPlaybackVolume] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [sessionCost, setSessionCost] = useState(0);
 
   const sessionRef = useRef<RealtimeSession | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -87,11 +96,29 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
     audioCtxRef.current = null;
   }, [stopRaf]);
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => { teardown(); };
+  }, [teardown]);
+
+  // ── Shared deactivate logic ────────────────────────────────────────────────
+
+  const deactivate = useCallback((clearError: boolean) => {
+    conversationActiveRef.current = false;
+    setConversationActive(false);
+    setSpeechDetected(false);
+    setIsModelSpeaking(false);
+    teardown();
+    setConnectionState("idle");
+    if (clearError) setErrorMessage(null);
+  }, [teardown]);
+
   // ── startConversation ──────────────────────────────────────────────────────
 
   const startConversation = useCallback(async () => {
     if (!persona || conversationActiveRef.current) return;
     setErrorMessage(null);
+    setSessionCost(0);
     setConnectionState("connecting");
 
     // Create AudioContext synchronously inside the gesture handler —
@@ -174,15 +201,27 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
 
       // 5. Wire events
 
-      // VAD signals — drive button colour
       session.on("transport_event", (event) => {
-        const e = event as { type: string };
+        const e = event as { type: string; response?: { usage?: UsageData } };
+
+        // VAD signals — drive button colour
         if (e.type === "input_audio_buffer.speech_started") {
           setSpeechDetected(true);
           setErrorMessage(null);
         }
         if (e.type === "input_audio_buffer.speech_stopped") {
           setSpeechDetected(false);
+        }
+
+        // Cost tracking — accumulate after every model response
+        if (e.type === "response.done" && e.response?.usage) {
+          const u = e.response.usage;
+          const cost =
+            (u.input_token_details?.audio_tokens  ?? 0) * PRICE_AUDIO_INPUT_PER_TOKEN  +
+            (u.output_token_details?.audio_tokens ?? 0) * PRICE_AUDIO_OUTPUT_PER_TOKEN +
+            (u.input_token_details?.text_tokens   ?? 0) * PRICE_TEXT_INPUT_PER_TOKEN   +
+            (u.output_token_details?.text_tokens  ?? 0) * PRICE_TEXT_OUTPUT_PER_TOKEN;
+          setSessionCost((prev) => prev + cost);
         }
       });
 
@@ -221,24 +260,11 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
 
   // ── stopConversation / reset ───────────────────────────────────────────────
 
-  const stopConversation = useCallback(() => {
-    conversationActiveRef.current = false;
-    setConversationActive(false);
-    setSpeechDetected(false);
-    setIsModelSpeaking(false);
-    teardown();
-    setConnectionState("idle");
-  }, [teardown]);
-
+  const stopConversation = useCallback(() => deactivate(false), [deactivate]);
   const reset = useCallback(() => {
-    conversationActiveRef.current = false;
-    setConversationActive(false);
-    setSpeechDetected(false);
-    setIsModelSpeaking(false);
-    teardown();
-    setErrorMessage(null);
-    setConnectionState("idle");
-  }, [teardown]);
+    deactivate(true);
+    setSessionCost(0);
+  }, [deactivate]);
 
   // Re-acquire wake lock when the page becomes visible
   useEffect(() => {
@@ -261,8 +287,23 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
     isModelSpeaking,
     playbackVolume,
     errorMessage,
+    sessionCost,
     startConversation,
     stopConversation,
     reset,
   };
+}
+
+// ── Local types for usage payload ─────────────────────────────────────────────
+
+interface TokenDetails {
+  audio_tokens?: number;
+  text_tokens?: number;
+  cached_tokens?: number;
+}
+
+interface UsageData {
+  input_token_details?: TokenDetails;
+  output_token_details?: TokenDetails;
+  total_tokens?: number;
 }
