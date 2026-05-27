@@ -3,11 +3,11 @@
 import { useCallback, useState } from "react";
 import { Settings } from "lucide-react";
 import type { Persona } from "@/lib/personas/types";
-import { useBatchConversation } from "@/lib/batch/useBatchConversation";
+import { useRealtimeConversation } from "@/lib/realtime/useRealtimeConversation";
 import { useSettings } from "@/lib/settings/useSettings";
-import { SettingsPanel } from "./SettingsPanel";
 import { PersonaSelector } from "./PersonaSelector";
 import { ConversationButton } from "./ConversationButton";
+import { SettingsPanel } from "./SettingsPanel";
 
 interface ConversationPageProps {
   personas: Persona[];
@@ -20,28 +20,20 @@ export function ConversationPage({ personas }: ConversationPageProps) {
   const { settings, updateSetting } = useSettings();
 
   const {
-    batchState,
-    micReady,
-    messages,
-    errorMessage,
-    currentTranscript,
-    currentReply,
-    playbackVolume,
+    connectionState,
     conversationActive,
     speechDetected,
-    prepareMic,
+    isModelSpeaking,
+    playbackVolume,
+    errorMessage,
     startConversation,
     stopConversation,
     reset,
-  } = useBatchConversation(selectedPersona, settings);
+  } = useRealtimeConversation(selectedPersona, settings);
 
-  const handlePersonaSelect = useCallback(
-    async (persona: Persona) => {
-      setSelectedPersona(persona);
-      await prepareMic();
-    },
-    [prepareMic]
-  );
+  const handlePersonaSelect = useCallback((persona: Persona) => {
+    setSelectedPersona(persona);
+  }, []);
 
   const handleReset = useCallback(() => {
     reset();
@@ -56,32 +48,20 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     }
   }, [conversationActive, startConversation, stopConversation]);
 
-  const isRecording = batchState === "recording";
-  const isProcessing = batchState === "processing";
-  const isPlaying = batchState === "playing";
-  const isDisabled = !micReady;
-
-  const statusText = conversationActive
-    ? isRecording
+  const statusText =
+    connectionState === "connecting"
+      ? "Conectando..."
+      : connectionState === "error"
+      ? ""
+      : conversationActive
       ? speechDetected
         ? "Hablando..."
+        : isModelSpeaking
+        ? "Reproduciendo..."
         : "Escuchando..."
-      : isProcessing
-      ? currentTranscript
-        ? "Respondiendo..."
-        : "Transcribiendo..."
-      : isPlaying
-      ? "Reproduciendo..."
-      : ""
-    : batchState === "error"
-    ? ""
-    : !micReady
-    ? "Solicitando micrófono..."
-    : messages.length === 0
-    ? "Pulsa para iniciar"
-    : "Conversación pausada";
-
-  const showInFlight = isProcessing && (currentTranscript || currentReply);
+      : selectedPersona
+      ? "Pulsa para continuar"
+      : "Pulsa para iniciar";
 
   return (
     <main className="min-h-screen bg-gray-950 flex flex-col items-center justify-between px-4 py-8 sm:py-12">
@@ -128,94 +108,68 @@ export function ConversationPage({ personas }: ConversationPageProps) {
             <div className="text-center">
               <p className="text-gray-400 text-sm">Hablando con</p>
               <p className="text-white font-semibold text-xl mt-1">{selectedPersona.displayName}</p>
-              <p className="text-gray-500 text-sm mt-1">{selectedPersona.speakingStyle} · {selectedPersona.accentRegion}</p>
+              <p className="text-gray-500 text-sm mt-1">
+                {selectedPersona.speakingStyle} · {selectedPersona.accentRegion}
+              </p>
             </div>
 
-            {/* Conversation history */}
-            {(messages.length >= 2 || showInFlight) && (
-              <div className="w-full flex flex-col gap-3">
-                {messages.length >= 2 && (() => {
-                  const lastUser = messages[messages.length - 2];
-                  const lastAssistant = messages[messages.length - 1];
-                  const dim = showInFlight;
-                  return (
-                    <>
-                      <div className={`self-end max-w-xs rounded-2xl bg-indigo-700 px-4 py-2.5 text-sm text-white transition-opacity ${dim ? "opacity-40" : ""}`}>
-                        {lastUser.content}
-                      </div>
-                      {!settings.listeningMode && (
-                        <div className={`self-start max-w-xs rounded-2xl bg-gray-800 px-4 py-2.5 text-sm text-gray-100 transition-opacity ${dim ? "opacity-40" : ""}`}>
-                          {lastAssistant.content}
-                        </div>
-                      )}
-                    </>
-                  );
-                })()}
-
-                {showInFlight && (
-                  <>
-                    {currentTranscript ? (
-                      <div className="self-end max-w-xs rounded-2xl bg-indigo-700 px-4 py-2.5 text-sm text-white">
-                        {currentTranscript}
-                      </div>
-                    ) : (
-                      <div className="self-end max-w-xs rounded-2xl bg-indigo-700/50 px-4 py-2.5 text-sm text-indigo-300 animate-pulse">
-                        …
-                      </div>
-                    )}
-                    {!settings.listeningMode && currentReply && (
-                      <div className="self-start max-w-xs rounded-2xl bg-gray-800 px-4 py-2.5 text-sm text-gray-100">
-                        {currentReply}
-                        <span className="inline-block w-0.5 h-3.5 bg-gray-400 ml-0.5 animate-pulse align-middle" />
-                      </div>
-                    )}
-                  </>
+            {/* Prompts — read-only, collapsed by default */}
+            <details className="w-full text-xs text-gray-600 group">
+              <summary className="cursor-pointer select-none list-none flex items-center gap-1 hover:text-gray-400 transition-colors w-fit mx-auto">
+                <span className="group-open:hidden">▸</span>
+                <span className="hidden group-open:inline">▾</span>
+                Ver instrucciones
+              </summary>
+              <div className="mt-3 space-y-3">
+                <div>
+                  <p className="text-gray-500 uppercase tracking-wide text-[10px] mb-1">System prompt</p>
+                  <pre className="whitespace-pre-wrap font-mono text-gray-500 bg-gray-900 rounded-lg p-3 leading-relaxed">
+                    {selectedPersona.systemPrompt}
+                  </pre>
+                </div>
+                {selectedPersona.voiceInstructions && (
+                  <div>
+                    <p className="text-gray-500 uppercase tracking-wide text-[10px] mb-1">Voice instructions</p>
+                    <pre className="whitespace-pre-wrap font-mono text-gray-500 bg-gray-900 rounded-lg p-3 leading-relaxed">
+                      {selectedPersona.voiceInstructions}
+                    </pre>
+                  </div>
                 )}
               </div>
-            )}
+            </details>
 
             {/* Conversation Button */}
             <div className="flex flex-col items-center gap-4">
               <ConversationButton
                 conversationActive={conversationActive}
-                batchState={batchState}
+                connectionState={connectionState}
                 speechDetected={speechDetected}
+                isModelSpeaking={isModelSpeaking}
                 playbackVolume={playbackVolume}
                 onToggle={handleConversationToggle}
-                disabled={isDisabled}
               />
               <p className="text-xs select-none min-h-4 text-gray-500">
                 {statusText}
               </p>
             </div>
-          </div>
-        )}
 
-        {/* Error */}
-        {errorMessage && (
-          <div className="max-w-sm w-full rounded-lg border border-red-800 bg-red-950 px-4 py-3 text-sm text-red-300">
-            {errorMessage}
-            {batchState === "error" && (
-              <button
-                onClick={() => reset()}
-                className="ml-3 underline text-red-400 hover:text-red-200"
-              >
-                Reintentar
-              </button>
+            {/* Error */}
+            {errorMessage && (
+              <div className="w-full rounded-lg border border-red-800 bg-red-950 px-4 py-3 text-sm text-red-300">
+                {errorMessage}
+                {connectionState === "error" && (
+                  <button
+                    onClick={() => reset()}
+                    className="ml-3 underline text-red-400 hover:text-red-200"
+                  >
+                    Reintentar
+                  </button>
+                )}
+              </div>
             )}
           </div>
         )}
       </div>
-
-      {/* Footer */}
-      <div className="w-full max-w-2xl flex justify-center">
-        <p className="text-xs text-gray-600">
-          {messages.length > 0
-            ? `${Math.ceil(messages.length / 2)} intercambio${messages.length > 2 ? "s" : ""}`
-            : ""}
-        </p>
-      </div>
-
     </main>
   );
 }

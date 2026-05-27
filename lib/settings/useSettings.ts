@@ -3,17 +3,15 @@
 import { useCallback, useState } from "react";
 
 export interface Settings {
-  ttsModel: "gpt-4o-mini-tts" | "tts-1" | "tts-1-hd";
-  gptModel: "gpt-4o-mini" | "gpt-4o";
-  sttModel: "gpt-4o-mini-transcribe" | "gpt-4o-transcribe";
-  listeningMode: boolean;
+  /** VAD activation threshold (0–1). Higher = needs louder audio to trigger. */
+  vadThreshold: number;
+  /** Silence duration in ms before the model responds. */
+  vadSilenceDurationMs: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  ttsModel: "gpt-4o-mini-tts",
-  gptModel: "gpt-4o-mini",
-  sttModel: "gpt-4o-mini-transcribe",
-  listeningMode: true,
+  vadThreshold: 0.5,
+  vadSilenceDurationMs: 800,
 };
 
 const STORAGE_KEY = "spansh-settings";
