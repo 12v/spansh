@@ -1,6 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  RealtimeAgent,
+  RealtimeSession,
+  OpenAIRealtimeWebRTC,
+} from "@openai/agents-realtime";
 import type { Persona } from "@/lib/personas/types";
 
 export type BatchState = "idle" | "connecting" | "recording" | "processing" | "playing" | "error";
@@ -20,8 +25,7 @@ export function useRealtimeConversation(persona: Persona | null) {
   const [speechDetected, setSpeechDetected] = useState(false);
   const [playbackVolume, setPlaybackVolume] = useState(0);
 
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-  const dcRef = useRef<RTCDataChannel | null>(null);
+  const sessionRef = useRef<RealtimeSession | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -72,86 +76,6 @@ export function useRealtimeConversation(persona: Persona | null) {
     }
   }, [batchState, startRaf, stopRaf]);
 
-  // ── Data channel event handler ─────────────────────────────────────────────
-  // useCallback([], []) — stable: only reads refs and calls stable setState fns.
-
-  const handleEvent = useCallback((event: MessageEvent) => {
-    let data: { type: string; [key: string]: unknown };
-    try {
-      data = JSON.parse(event.data as string);
-    } catch {
-      return;
-    }
-
-    switch (data.type) {
-      // User started speaking — reset accumulators for the new turn
-      case "input_audio_buffer.speech_started":
-        pendingTranscriptRef.current = "";
-        pendingReplyRef.current = "";
-        setCurrentTranscript("");
-        setCurrentReply("");
-        setBatchState("recording");
-        setSpeechDetected(true);
-        setErrorMessage(null);
-        break;
-
-      // User stopped speaking — waiting for model response
-      case "input_audio_buffer.speech_stopped":
-        setBatchState("processing");
-        setSpeechDetected(false);
-        break;
-
-      // User's speech transcription ready
-      case "conversation.item.input_audio_transcription.completed": {
-        const transcript = (data.transcript as string) ?? "";
-        pendingTranscriptRef.current = transcript;
-        setCurrentTranscript(transcript);
-        break;
-      }
-
-      // Model begins generating a response — audio will start flowing on the WebRTC track
-      case "response.created":
-        setBatchState("playing");
-        break;
-
-      // Streaming transcript of what the model is saying (mirrors the audio track)
-      case "response.audio_transcript.delta": {
-        const delta = (data.delta as string) ?? "";
-        pendingReplyRef.current += delta;
-        setCurrentReply((prev) => prev + delta);
-        break;
-      }
-
-      // Response fully done — commit to conversation history
-      case "response.done": {
-        const finalTranscript = pendingTranscriptRef.current;
-        const finalReply = pendingReplyRef.current;
-        pendingTranscriptRef.current = "";
-        pendingReplyRef.current = "";
-        if (finalTranscript || finalReply) {
-          setMessages((prev) => [
-            ...prev,
-            { role: "user", content: finalTranscript },
-            { role: "assistant", content: finalReply },
-          ]);
-        }
-        setCurrentTranscript("");
-        setCurrentReply("");
-        setBatchState("idle");
-        break;
-      }
-
-      case "error": {
-        const errMsg =
-          (data.error as { message?: string } | undefined)?.message ??
-          "Error desconocido";
-        setErrorMessage(errMsg);
-        setBatchState("error");
-        break;
-      }
-    }
-  }, []);
-
   // ── Teardown ───────────────────────────────────────────────────────────────
 
   const teardown = useCallback(() => {
@@ -160,20 +84,8 @@ export function useRealtimeConversation(persona: Persona | null) {
     wakeLockRef.current?.release().catch(() => {});
     wakeLockRef.current = null;
 
-    if (dcRef.current) {
-      dcRef.current.onmessage = null;
-      dcRef.current.onopen = null;
-      dcRef.current.close();
-      dcRef.current = null;
-    }
-
-    if (pcRef.current) {
-      pcRef.current.ontrack = null;
-      // Stop all local mic tracks
-      pcRef.current.getSenders().forEach((s) => s.track?.stop());
-      pcRef.current.close();
-      pcRef.current = null;
-    }
+    sessionRef.current?.close();
+    sessionRef.current = null;
 
     analyserRef.current?.disconnect();
     analyserRef.current = null;
@@ -214,99 +126,152 @@ export function useRealtimeConversation(persona: Persona | null) {
         const err = await tokenRes.json().catch(() => ({ error: tokenRes.statusText }));
         throw new Error(err.error ?? `HTTP ${tokenRes.status}`);
       }
-      const session = await tokenRes.json();
-      const token: string = session.client_secret?.value;
-      if (!token) throw new Error(`No token in session response: ${JSON.stringify(session)}`);
+      const data = await tokenRes.json();
+      const token: string = data.client_secret?.value;
+      if (!token) throw new Error(`No token in response: ${JSON.stringify(data)}`);
 
-      // 2. Capture mic
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
+      // 2. Build the persona agent (instructions + voice set here)
+      const instructions = [persona.systemPrompt, persona.voiceInstructions]
+        .filter(Boolean)
+        .join("\n\n");
+
+      const agent = new RealtimeAgent({
+        name: persona.displayName,
+        instructions,
+        voice: persona.voice,
       });
 
-      // 3. Create RTCPeerConnection and add mic track
-      const pc = new RTCPeerConnection();
-      pcRef.current = pc;
-      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+      // 3. Custom WebRTC transport:
+      //    – override pc.ontrack to route remote audio through Web Audio API
+      //      (bypasses iOS silent switch; feeds the volume-glow analyser)
+      //    – the SDK sets pc.ontrack = (e) => audioEl.srcObject = e.streams[0]
+      //      before calling changePeerConnection, so reassigning ontrack here
+      //      replaces the SDK's default playback path entirely.
+      const transport = new OpenAIRealtimeWebRTC({
+        changePeerConnection: async (pc) => {
+          pc.ontrack = (event) => {
+            const ctx = audioCtxRef.current;
+            const analyserNode = analyserRef.current;
+            if (!ctx || !analyserNode) return;
+            ctx.createMediaStreamSource(event.streams[0]).connect(analyserNode);
+          };
+          return pc;
+        },
+      });
 
-      // 4. Route remote audio through Web Audio (bypasses iOS silent switch)
-      //    createMediaStreamSource → analyser → destination
-      pc.ontrack = (e) => {
-        const ctx = audioCtxRef.current;
-        const analyserNode = analyserRef.current;
-        if (!ctx || !analyserNode) return;
-        const source = ctx.createMediaStreamSource(e.streams[0]);
-        source.connect(analyserNode);
-      };
-
-      // 5. Data channel for JSON events
-      const dc = pc.createDataChannel("oai-events");
-      dcRef.current = dc;
-
-      // Send session.update once the channel is open — by this point the
-      // server has received our SDP and the session is ready.
-      dc.onopen = () => {
-        const channel = dcRef.current;
-        if (!channel || channel.readyState !== "open") return;
-        const instructions = [persona.systemPrompt, persona.voiceInstructions]
-          .filter(Boolean)
-          .join("\n\n");
-        channel.send(
-          JSON.stringify({
-            type: "session.update",
-            session: {
-              voice: persona.voice,
-              instructions,
-              input_audio_transcription: {
-                model: "gpt-4o-mini-transcribe",
-                language: "es",
-              },
-              turn_detection: {
+      // 4. Create session: model locked to gpt-realtime-mini, Spanish transcription,
+      //    server VAD tuned for natural speech pacing.
+      const session = new RealtimeSession(agent, {
+        transport,
+        model: "gpt-realtime-mini",
+        tracingDisabled: true,
+        config: {
+          audio: {
+            input: {
+              transcription: { model: "gpt-4o-mini-transcribe", language: "es" },
+              turnDetection: {
                 type: "server_vad",
-                silence_duration_ms: 800,
+                silenceDurationMs: 800,
                 threshold: 0.5,
-                prefix_padding_ms: 300,
+                prefixPaddingMs: 300,
               },
             },
-          })
-        );
-      };
-
-      dc.onmessage = handleEvent;
-
-      // 6. SDP offer/answer with OpenAI
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      // gpt-realtime-mini uses the standard SDP endpoint with ?model= query param
-      const sdpRes = await fetch(
-        "https://api.openai.com/v1/realtime?model=gpt-realtime-mini",
-        {
-          method: "POST",
-          body: offer.sdp,
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/sdp",
           },
+        },
+      });
+      sessionRef.current = session;
+
+      // 5. Wire raw data-channel events for BatchState + transcript accumulation
+      session.on("transport_event", (event) => {
+        const e = event as { type: string; [key: string]: unknown };
+
+        switch (e.type) {
+          // User started speaking — reset accumulators for the new turn
+          case "input_audio_buffer.speech_started":
+            pendingTranscriptRef.current = "";
+            pendingReplyRef.current = "";
+            setCurrentTranscript("");
+            setCurrentReply("");
+            setBatchState("recording");
+            setSpeechDetected(true);
+            setErrorMessage(null);
+            break;
+
+          // User stopped speaking — waiting for model response
+          case "input_audio_buffer.speech_stopped":
+            setBatchState("processing");
+            setSpeechDetected(false);
+            break;
+
+          // User's speech transcription ready
+          case "conversation.item.input_audio_transcription.completed": {
+            const transcript = (e.transcript as string) ?? "";
+            pendingTranscriptRef.current = transcript;
+            setCurrentTranscript(transcript);
+            break;
+          }
+
+          // Model begins generating a response
+          case "response.created":
+            setBatchState("playing");
+            break;
+
+          // Streaming transcript of what the model is saying
+          case "response.audio_transcript.delta": {
+            const delta = (e.delta as string) ?? "";
+            pendingReplyRef.current += delta;
+            setCurrentReply((prev) => prev + delta);
+            break;
+          }
+
+          // Response fully done — commit to conversation history
+          case "response.done": {
+            const finalTranscript = pendingTranscriptRef.current;
+            const finalReply = pendingReplyRef.current;
+            pendingTranscriptRef.current = "";
+            pendingReplyRef.current = "";
+            if (finalTranscript || finalReply) {
+              setMessages((prev) => [
+                ...prev,
+                { role: "user", content: finalTranscript },
+                { role: "assistant", content: finalReply },
+              ]);
+            }
+            setCurrentTranscript("");
+            setCurrentReply("");
+            setBatchState("idle");
+            break;
+          }
+
+          case "error": {
+            const errMsg =
+              (e.error as { message?: string } | undefined)?.message ??
+              "Error desconocido";
+            setErrorMessage(errMsg);
+            setBatchState("error");
+            break;
+          }
         }
-      );
-      if (!sdpRes.ok) {
-        const errBody = await sdpRes.text().catch(() => "");
-        throw new Error(`SDP exchange failed: ${sdpRes.status} ${errBody || sdpRes.statusText}`);
-      }
+      });
 
-      const answerSdp = await sdpRes.text();
-      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      // Session-level error handler (covers SDK/transport errors not in data channel)
+      session.on("error", ({ error }) => {
+        const msg = error instanceof Error ? error.message : String(error);
+        setErrorMessage(msg);
+        setBatchState("error");
+      });
 
-      // WebRTC connected — mark conversation active
+      // 6. Connect — SDK handles: getUserMedia, RTCPeerConnection, SDP to /v1/realtime/calls,
+      //    session.update with agent instructions + VAD/transcription config.
+      await session.connect({ apiKey: token });
+
       conversationActiveRef.current = true;
       setConversationActive(true);
       setBatchState("idle");
 
       navigator.wakeLock
         ?.request("screen")
-        .then((lock) => {
-          wakeLockRef.current = lock;
-        })
+        .then((lock) => { wakeLockRef.current = lock; })
         .catch(() => {});
     } catch (err) {
       teardown();
@@ -315,7 +280,7 @@ export function useRealtimeConversation(persona: Persona | null) {
       setErrorMessage(msg);
       setBatchState("error");
     }
-  }, [persona, handleEvent, teardown]);
+  }, [persona, teardown]);
 
   // ── stopConversation / reset ───────────────────────────────────────────────
 
@@ -344,9 +309,7 @@ export function useRealtimeConversation(persona: Persona | null) {
       if (document.visibilityState === "visible" && conversationActiveRef.current) {
         navigator.wakeLock
           ?.request("screen")
-          .then((lock) => {
-            wakeLockRef.current = lock;
-          })
+          .then((lock) => { wakeLockRef.current = lock; })
           .catch(() => {});
       }
     };
