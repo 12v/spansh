@@ -17,14 +17,15 @@ export async function GET(req: NextRequest) {
     return Response.json({ error: `Unknown persona: ${personaId}` }, { status: 400 });
   }
 
-  // Create a short-lived ephemeral token (eph_...) for WebRTC SDP auth.
-  // beta.realtime.sessions is the path that supports the standard /v1/realtime
-  // SDP endpoint used for direct browser-to-model WebRTC connections.
-  const session = await openai.beta.realtime.sessions.create({
-    model: "gpt-4o-mini-realtime-preview",
-    voice: persona.voice,
+  // Mint a short-lived client secret (ek_...) for WebRTC SDP auth.
+  // Voice and instructions are applied via session.update once the data channel opens.
+  const secret = await openai.realtime.clientSecrets.create({
+    session: {
+      type: "realtime",
+      model: "gpt-realtime-mini",
+    },
   });
 
-  // Return the full session object; client uses session.client_secret.value
-  return Response.json(session);
+  // Client uses secret.value as the Bearer token in the SDP offer
+  return Response.json(secret);
 }

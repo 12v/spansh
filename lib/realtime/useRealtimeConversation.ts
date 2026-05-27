@@ -213,8 +213,8 @@ export function useRealtimeConversation(persona: Persona | null) {
         const err = await tokenRes.json().catch(() => ({ error: tokenRes.statusText }));
         throw new Error(err.error ?? `HTTP ${tokenRes.status}`);
       }
-      const session = await tokenRes.json();
-      const token: string = session.client_secret?.value;
+      const secret = await tokenRes.json();
+      const token: string = secret.value;
       if (!token) throw new Error("No ephemeral token in session response");
 
       // 2. Capture mic
@@ -273,7 +273,7 @@ export function useRealtimeConversation(persona: Persona | null) {
       await pc.setLocalDescription(offer);
 
       const sdpRes = await fetch(
-        "https://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview",
+        "https://api.openai.com/v1/realtime?model=gpt-realtime-mini",
         {
           method: "POST",
           body: offer.sdp,
