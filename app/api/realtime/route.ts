@@ -1,10 +1,12 @@
 import { NextRequest } from "next/server";
+import OpenAI from "openai";
 import { getPersonaById } from "@/lib/personas";
 
 export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
   try {
+    const openai = new OpenAI();
     const personaId = req.nextUrl.searchParams.get("personaId");
 
     if (!personaId) {
@@ -16,30 +18,23 @@ export async function GET(req: NextRequest) {
       return Response.json({ error: `Unknown persona: ${personaId}` }, { status: 400 });
     }
 
-    // Direct fetch — no SDK, no OpenAI-Beta header injected by the beta namespace.
-    // POST /v1/realtime/sessions is the GA session creation endpoint.
-    // Returns session.client_secret.value used as the Bearer token in the SDP exchange.
-    const res = await fetch("https://api.openai.com/v1/realtime/sessions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    // openai.realtime.clientSecrets.create() → POST /v1/realtime/client_secrets
+    // This is the GA endpoint (no OpenAI-Beta header).
+    // Returns { value: "ek_…", expires_at, session } — value is the ephemeral bearer token.
+    const secret = await openai.realtime.clientSecrets.create({
+      session: {
+        type: "realtime",
         model: "gpt-realtime-mini",
-        voice: persona.voice,
-      }),
+        audio: {
+          output: {
+            voice: persona.voice,
+          },
+        },
+      },
     });
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const msg = err?.error?.message ?? `OpenAI ${res.status}`;
-      console.error("[api/realtime]", msg);
-      return Response.json({ error: msg }, { status: res.status });
-    }
-
-    const session = await res.json();
-    return Response.json(session);
+    // Shape the response so the browser hook can read client_secret.value
+    return Response.json({ client_secret: { value: secret.value } });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[api/realtime]", message);
