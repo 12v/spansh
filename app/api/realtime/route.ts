@@ -1,9 +1,11 @@
 import { NextRequest } from "next/server";
+import OpenAI from "openai";
 import { getPersonaById } from "@/lib/personas";
 
 export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
+  const openai = new OpenAI();
   const personaId = req.nextUrl.searchParams.get("personaId");
 
   if (!personaId) {
@@ -15,29 +17,15 @@ export async function GET(req: NextRequest) {
     return Response.json({ error: `Unknown persona: ${personaId}` }, { status: 400 });
   }
 
-  // POST /v1/realtime/sessions — GA Realtime API session creation.
-  // Returns a session object with client_secret.value (eph_ token) which
-  // the browser uses as the Bearer token in the /v1/realtime/calls SDP exchange.
-  const res = await fetch("https://api.openai.com/v1/realtime/sessions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-realtime-mini",
-      voice: persona.voice,
-    }),
+  // openai.beta.realtime.sessions.create() POSTs to /realtime/sessions —
+  // the GA Realtime API session endpoint. The "beta" prefix is the SDK's
+  // package namespace, not an indication that the underlying API is
+  // deprecated. The returned session.client_secret.value (eph_ token) is
+  // used by the browser as the Bearer token in the /v1/realtime/calls SDP exchange.
+  const session = await openai.beta.realtime.sessions.create({
+    model: "gpt-realtime-mini" as "gpt-4o-mini-realtime-preview",
+    voice: persona.voice,
   });
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    return Response.json(
-      { error: err?.error?.message ?? `OpenAI ${res.status}` },
-      { status: res.status }
-    );
-  }
-
-  const session = await res.json();
   return Response.json(session);
 }
