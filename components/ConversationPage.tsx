@@ -181,20 +181,20 @@ export function ConversationPage({ personas }: ConversationPageProps) {
                 {statusText}
               </p>
             </div>
-          </div>
-        )}
 
-        {/* Error */}
-        {errorMessage && (
-          <div className="max-w-sm w-full rounded-lg border border-red-800 bg-red-950 px-4 py-3 text-sm text-red-300">
-            {errorMessage}
-            {batchState === "error" && (
-              <button
-                onClick={() => reset()}
-                className="ml-3 underline text-red-400 hover:text-red-200"
-              >
-                Reintentar
-              </button>
+            {/* Error — kept inside persona view so it's always on-screen */}
+            {errorMessage && (
+              <div className="w-full rounded-lg border border-red-800 bg-red-950 px-4 py-3 text-sm text-red-300">
+                {errorMessage}
+                {batchState === "error" && (
+                  <button
+                    onClick={() => reset()}
+                    className="ml-3 underline text-red-400 hover:text-red-200"
+                  >
+                    Reintentar
+                  </button>
+                )}
+              </div>
             )}
           </div>
         )}

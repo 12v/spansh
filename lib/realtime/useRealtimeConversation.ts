@@ -214,9 +214,9 @@ export function useRealtimeConversation(persona: Persona | null) {
         const err = await tokenRes.json().catch(() => ({ error: tokenRes.statusText }));
         throw new Error(err.error ?? `HTTP ${tokenRes.status}`);
       }
-      const session = await tokenRes.json();
-      const token: string = session.client_secret?.value;
-      if (!token) throw new Error("No ephemeral token in session response");
+      const secret = await tokenRes.json();
+      const token: string = secret.value;
+      if (!token) throw new Error(`No token in session response: ${JSON.stringify(secret)}`);
 
       // 2. Capture mic
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -277,9 +277,9 @@ export function useRealtimeConversation(persona: Persona | null) {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      // GA Realtime API — SDP exchange endpoint (replaces old /v1/realtime?model=...)
+      // GA Realtime API — model is embedded in the ek_ token, no ?model= param
       const sdpRes = await fetch(
-        "https://api.openai.com/v1/realtime/calls",
+        "https://api.openai.com/v1/realtime",
         {
           method: "POST",
           body: offer.sdp,
@@ -311,6 +311,7 @@ export function useRealtimeConversation(persona: Persona | null) {
     } catch (err) {
       teardown();
       const msg = err instanceof Error ? err.message : "Error al conectar";
+      console.error("[useRealtimeConversation] startConversation failed:", msg);
       setErrorMessage(msg);
       setBatchState("error");
     }
