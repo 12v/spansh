@@ -213,9 +213,9 @@ export function useRealtimeConversation(persona: Persona | null) {
         const err = await tokenRes.json().catch(() => ({ error: tokenRes.statusText }));
         throw new Error(err.error ?? `HTTP ${tokenRes.status}`);
       }
-      const secret = await tokenRes.json();
-      const token: string = secret.value;
-      if (!token) throw new Error("No token in session response");
+      const session = await tokenRes.json();
+      const token: string = session.client_secret?.value;
+      if (!token) throw new Error("No ephemeral token in session response");
 
       // 2. Capture mic
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -273,7 +273,7 @@ export function useRealtimeConversation(persona: Persona | null) {
       await pc.setLocalDescription(offer);
 
       const sdpRes = await fetch(
-        "https://api.openai.com/v1/realtime?model=gpt-realtime-mini",
+        "https://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview",
         {
           method: "POST",
           body: offer.sdp,
@@ -284,7 +284,8 @@ export function useRealtimeConversation(persona: Persona | null) {
         }
       );
       if (!sdpRes.ok) {
-        throw new Error(`SDP exchange failed: ${sdpRes.status} ${sdpRes.statusText}`);
+        const errBody = await sdpRes.text().catch(() => "");
+        throw new Error(`SDP exchange failed: ${sdpRes.status} ${errBody || sdpRes.statusText}`);
       }
 
       const answerSdp = await sdpRes.text();

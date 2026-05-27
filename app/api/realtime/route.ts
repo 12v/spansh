@@ -1,7 +1,6 @@
 import { NextRequest } from "next/server";
 import OpenAI from "openai";
 import { getPersonaById } from "@/lib/personas";
-import type { RealtimeVoice } from "@/lib/personas/types";
 
 export const runtime = "nodejs";
 
@@ -18,19 +17,14 @@ export async function GET(req: NextRequest) {
     return Response.json({ error: `Unknown persona: ${personaId}` }, { status: 400 });
   }
 
-  // Create a short-lived client secret for WebRTC SDP auth.
-  // The returned `value` is sent as the Bearer token in the client's SDP offer.
-  const secret = await openai.realtime.clientSecrets.create({
-    session: {
-      type: "realtime",
-      model: "gpt-realtime-mini",
-      // Voice and instructions are overridden via session.update once the
-      // data channel opens, but setting voice here locks it in early.
-      audio: {
-        output: { voice: persona.voice as RealtimeVoice & string },
-      },
-    },
+  // Create a short-lived ephemeral token (eph_...) for WebRTC SDP auth.
+  // beta.realtime.sessions is the path that supports the standard /v1/realtime
+  // SDP endpoint used for direct browser-to-model WebRTC connections.
+  const session = await openai.beta.realtime.sessions.create({
+    model: "gpt-4o-mini-realtime-preview",
+    voice: persona.voice,
   });
 
-  return Response.json(secret);
+  // Return the full session object; client uses session.client_secret.value
+  return Response.json(session);
 }
