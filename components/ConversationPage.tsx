@@ -72,7 +72,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     ? "Pulsa para iniciar"
     : "Conversación pausada";
 
-  const showInFlight = isProcessing && (currentTranscript || currentReply);
+  const showInFlight = (isProcessing || isPlaying) && (currentTranscript || currentReply);
 
   return (
     <main className="min-h-screen bg-gray-950 flex flex-col items-center justify-between px-4 py-8 sm:py-12">

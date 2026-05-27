@@ -1,11 +1,9 @@
 import { NextRequest } from "next/server";
-import OpenAI from "openai";
 import { getPersonaById } from "@/lib/personas";
 
 export const runtime = "nodejs";
 
 export async function GET(req: NextRequest) {
-  const openai = new OpenAI();
   const personaId = req.nextUrl.searchParams.get("personaId");
 
   if (!personaId) {
@@ -17,15 +15,29 @@ export async function GET(req: NextRequest) {
     return Response.json({ error: `Unknown persona: ${personaId}` }, { status: 400 });
   }
 
-  // Mint a short-lived client secret (ek_...) for WebRTC SDP auth.
-  // Voice and instructions are applied via session.update once the data channel opens.
-  const secret = await openai.realtime.clientSecrets.create({
-    session: {
-      type: "realtime",
-      model: "gpt-realtime-mini",
+  // POST /v1/realtime/sessions — GA Realtime API session creation.
+  // Returns a session object with client_secret.value (eph_ token) which
+  // the browser uses as the Bearer token in the /v1/realtime/calls SDP exchange.
+  const res = await fetch("https://api.openai.com/v1/realtime/sessions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
     },
+    body: JSON.stringify({
+      model: "gpt-realtime-mini",
+      voice: persona.voice,
+    }),
   });
 
-  // Client uses secret.value as the Bearer token in the SDP offer
-  return Response.json(secret);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return Response.json(
+      { error: err?.error?.message ?? `OpenAI ${res.status}` },
+      { status: res.status }
+    );
+  }
+
+  const session = await res.json();
+  return Response.json(session);
 }

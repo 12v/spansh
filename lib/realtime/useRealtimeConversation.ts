@@ -213,8 +213,8 @@ export function useRealtimeConversation(persona: Persona | null) {
         const err = await tokenRes.json().catch(() => ({ error: tokenRes.statusText }));
         throw new Error(err.error ?? `HTTP ${tokenRes.status}`);
       }
-      const secret = await tokenRes.json();
-      const token: string = secret.value;
+      const session = await tokenRes.json();
+      const token: string = session.client_secret?.value;
       if (!token) throw new Error("No ephemeral token in session response");
 
       // 2. Capture mic
@@ -253,8 +253,12 @@ export function useRealtimeConversation(persona: Persona | null) {
           JSON.stringify({
             type: "session.update",
             session: {
+              voice: persona.voice,
               instructions,
-              input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+              input_audio_transcription: {
+                model: "gpt-4o-mini-transcribe",
+                language: "es",
+              },
               turn_detection: {
                 type: "server_vad",
                 silence_duration_ms: 800,
@@ -272,8 +276,9 @@ export function useRealtimeConversation(persona: Persona | null) {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      // GA Realtime API — SDP exchange endpoint (replaces old /v1/realtime?model=...)
       const sdpRes = await fetch(
-        "https://api.openai.com/v1/realtime?model=gpt-realtime-mini",
+        "https://api.openai.com/v1/realtime/calls",
         {
           method: "POST",
           body: offer.sdp,
