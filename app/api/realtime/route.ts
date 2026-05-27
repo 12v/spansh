@@ -18,17 +18,15 @@ export async function GET(req: NextRequest) {
       return Response.json({ error: `Unknown persona: ${personaId}` }, { status: 400 });
     }
 
-    // realtime.clientSecrets.create() → POST /realtime/client_secrets
-    // Supports gpt-realtime-mini; returns { value: "ek_...", session: {...} }
-    // The browser uses secret.value as the Bearer token for the SDP exchange.
-    const secret = await openai.realtime.clientSecrets.create({
-      session: {
-        type: "realtime",
-        model: "gpt-realtime-mini",
-      },
+    // openai.beta.realtime.sessions.create() → POST /realtime/sessions
+    // (same endpoint as client.realtime.sessions.create() in newer SDK versions)
+    // Returns session.client_secret.value used as Bearer in the SDP exchange.
+    const session = await openai.beta.realtime.sessions.create({
+      model: "gpt-realtime-mini" as "gpt-4o-mini-realtime-preview",
+      voice: persona.voice,
     });
 
-    return Response.json(secret);
+    return Response.json(session);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[api/realtime]", message);
