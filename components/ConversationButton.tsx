@@ -2,7 +2,7 @@
 
 import { Mic } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { BatchState } from "@/lib/batch/useBatchConversation";
+import type { BatchState } from "@/lib/realtime/useRealtimeConversation";
 
 interface ConversationButtonProps {
   conversationActive: boolean;

@@ -3,7 +3,7 @@
 import { useCallback, useState } from "react";
 import { Settings } from "lucide-react";
 import type { Persona } from "@/lib/personas/types";
-import { useBatchConversation } from "@/lib/batch/useBatchConversation";
+import { useRealtimeConversation } from "@/lib/realtime/useRealtimeConversation";
 import { useSettings } from "@/lib/settings/useSettings";
 import { SettingsPanel } from "./SettingsPanel";
 import { PersonaSelector } from "./PersonaSelector";
@@ -21,7 +21,6 @@ export function ConversationPage({ personas }: ConversationPageProps) {
 
   const {
     batchState,
-    micReady,
     messages,
     errorMessage,
     currentTranscript,
@@ -29,19 +28,14 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     playbackVolume,
     conversationActive,
     speechDetected,
-    prepareMic,
     startConversation,
     stopConversation,
     reset,
-  } = useBatchConversation(selectedPersona, settings);
+  } = useRealtimeConversation(selectedPersona);
 
-  const handlePersonaSelect = useCallback(
-    async (persona: Persona) => {
-      setSelectedPersona(persona);
-      await prepareMic();
-    },
-    [prepareMic]
-  );
+  const handlePersonaSelect = useCallback((persona: Persona) => {
+    setSelectedPersona(persona);
+  }, []);
 
   const handleReset = useCallback(() => {
     reset();
@@ -59,7 +53,6 @@ export function ConversationPage({ personas }: ConversationPageProps) {
   const isRecording = batchState === "recording";
   const isProcessing = batchState === "processing";
   const isPlaying = batchState === "playing";
-  const isDisabled = !micReady;
 
   const statusText = conversationActive
     ? isRecording
@@ -75,8 +68,6 @@ export function ConversationPage({ personas }: ConversationPageProps) {
       : ""
     : batchState === "error"
     ? ""
-    : !micReady
-    ? "Solicitando micrófono..."
     : messages.length === 0
     ? "Pulsa para iniciar"
     : "Conversación pausada";
@@ -137,7 +128,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
                 {messages.length >= 2 && (() => {
                   const lastUser = messages[messages.length - 2];
                   const lastAssistant = messages[messages.length - 1];
-                  const dim = showInFlight;
+                  const dim = !!showInFlight;
                   return (
                     <>
                       <div className={`self-end max-w-xs rounded-2xl bg-indigo-700 px-4 py-2.5 text-sm text-white transition-opacity ${dim ? "opacity-40" : ""}`}>
@@ -182,7 +173,6 @@ export function ConversationPage({ personas }: ConversationPageProps) {
                 speechDetected={speechDetected}
                 playbackVolume={playbackVolume}
                 onToggle={handleConversationToggle}
-                disabled={isDisabled}
               />
               <p className="text-xs select-none min-h-4 text-gray-500">
                 {statusText}

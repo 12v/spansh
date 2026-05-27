@@ -10,29 +10,6 @@ interface SettingsPanelProps {
   onClose: () => void;
 }
 
-function ToggleButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`flex-1 py-2 px-3 rounded-lg text-sm border transition-colors ${
-        active
-          ? "bg-indigo-600 border-indigo-500 text-white"
-          : "bg-gray-800 border-gray-700 text-gray-300 hover:border-gray-600"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
 export function SettingsPanel({ settings, onUpdate, onClose }: SettingsPanelProps) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -59,74 +36,8 @@ export function SettingsPanel({ settings, onUpdate, onClose }: SettingsPanelProp
           </button>
         </div>
 
-        {/* STT model */}
-        <div className="mb-5">
-          <p className="text-white text-sm font-medium mb-0.5">Transcripción</p>
-          <p className="text-gray-500 text-xs mb-2">Mini is faster and cheaper — recommended</p>
-          <div className="flex gap-2">
-            <ToggleButton
-              active={settings.sttModel === "gpt-4o-mini-transcribe"}
-              onClick={() => onUpdate("sttModel", "gpt-4o-mini-transcribe")}
-            >
-              Mini
-            </ToggleButton>
-            <ToggleButton
-              active={settings.sttModel === "gpt-4o-transcribe"}
-              onClick={() => onUpdate("sttModel", "gpt-4o-transcribe")}
-            >
-              Preciso
-            </ToggleButton>
-          </div>
-        </div>
-
-        {/* TTS model */}
-        <div className="mb-5">
-          <p className="text-white text-sm font-medium mb-0.5">Calidad de voz</p>
-          <p className="text-gray-500 text-xs mb-2">Mini follows accent instructions — recommended</p>
-          <div className="flex gap-2">
-            <ToggleButton
-              active={settings.ttsModel === "gpt-4o-mini-tts"}
-              onClick={() => onUpdate("ttsModel", "gpt-4o-mini-tts")}
-            >
-              Mini
-            </ToggleButton>
-            <ToggleButton
-              active={settings.ttsModel === "tts-1"}
-              onClick={() => onUpdate("ttsModel", "tts-1")}
-            >
-              Estándar
-            </ToggleButton>
-            <ToggleButton
-              active={settings.ttsModel === "tts-1-hd"}
-              onClick={() => onUpdate("ttsModel", "tts-1-hd")}
-            >
-              HD
-            </ToggleButton>
-          </div>
-        </div>
-
-        {/* GPT model */}
-        <div className="mb-5">
-          <p className="text-white text-sm font-medium mb-0.5">Modelo de respuesta</p>
-          <p className="text-gray-500 text-xs mb-2">Better quality costs ~5× more per reply</p>
-          <div className="flex gap-2">
-            <ToggleButton
-              active={settings.gptModel === "gpt-4o-mini"}
-              onClick={() => onUpdate("gptModel", "gpt-4o-mini")}
-            >
-              Rápido
-            </ToggleButton>
-            <ToggleButton
-              active={settings.gptModel === "gpt-4o"}
-              onClick={() => onUpdate("gptModel", "gpt-4o")}
-            >
-              Mejor
-            </ToggleButton>
-          </div>
-        </div>
-
         {/* Listening mode */}
-        <div className="flex items-center justify-between pt-1">
+        <div className="flex items-center justify-between">
           <div>
             <p className="text-white text-sm font-medium">Modo escucha</p>
             <p className="text-gray-500 text-xs">Hide text — comprehend by ear only</p>
