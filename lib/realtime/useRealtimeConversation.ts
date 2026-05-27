@@ -8,22 +8,15 @@ import {
 } from "@openai/agents-realtime";
 import type { Persona } from "@/lib/personas/types";
 
-export type BatchState = "idle" | "connecting" | "recording" | "processing" | "playing" | "error";
-
-export interface ConversationMessage {
-  role: "user" | "assistant";
-  content: string;
-}
+export type ConnectionState = "idle" | "connecting" | "active" | "error";
 
 export function useRealtimeConversation(persona: Persona | null) {
-  const [batchState, setBatchState] = useState<BatchState>("idle");
-  const [messages, setMessages] = useState<ConversationMessage[]>([]);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [currentTranscript, setCurrentTranscript] = useState("");
-  const [currentReply, setCurrentReply] = useState("");
+  const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [conversationActive, setConversationActive] = useState(false);
   const [speechDetected, setSpeechDetected] = useState(false);
+  const [isModelSpeaking, setIsModelSpeaking] = useState(false);
   const [playbackVolume, setPlaybackVolume] = useState(0);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const sessionRef = useRef<RealtimeSession | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -31,10 +24,6 @@ export function useRealtimeConversation(persona: Persona | null) {
   const rafRef = useRef<number | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const conversationActiveRef = useRef(false);
-
-  // Accumulate in refs so the event handler (stable closure) always reads latest
-  const pendingTranscriptRef = useRef("");
-  const pendingReplyRef = useRef("");
 
   // ── RAF loop for playback volume glow ─────────────────────────────────────
 
@@ -47,7 +36,7 @@ export function useRealtimeConversation(persona: Persona | null) {
   }, []);
 
   const startRaf = useCallback(() => {
-    if (rafRef.current !== null) return; // already running
+    if (rafRef.current !== null) return;
     const analyser = analyserRef.current;
     if (!analyser) return;
     const buf = new Uint8Array(analyser.frequencyBinCount);
@@ -67,14 +56,13 @@ export function useRealtimeConversation(persona: Persona | null) {
     rafRef.current = requestAnimationFrame(tick);
   }, []);
 
-  // Drive RAF from batchState
   useEffect(() => {
-    if (batchState === "playing") {
+    if (isModelSpeaking) {
       startRaf();
     } else {
       stopRaf();
     }
-  }, [batchState, startRaf, stopRaf]);
+  }, [isModelSpeaking, startRaf, stopRaf]);
 
   // ── Teardown ───────────────────────────────────────────────────────────────
 
@@ -92,9 +80,6 @@ export function useRealtimeConversation(persona: Persona | null) {
 
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
-
-    pendingTranscriptRef.current = "";
-    pendingReplyRef.current = "";
   }, [stopRaf]);
 
   // ── startConversation ──────────────────────────────────────────────────────
@@ -102,7 +87,7 @@ export function useRealtimeConversation(persona: Persona | null) {
   const startConversation = useCallback(async () => {
     if (!persona || conversationActiveRef.current) return;
     setErrorMessage(null);
-    setBatchState("connecting"); // immediate visual feedback before any async work
+    setConnectionState("connecting");
 
     // Create AudioContext synchronously inside the gesture handler —
     // iOS Safari requires this before any await or the context starts suspended.
@@ -118,7 +103,7 @@ export function useRealtimeConversation(persona: Persona | null) {
     analyserRef.current = analyser;
 
     try {
-      // 1. Fetch ephemeral client secret from our API route
+      // 1. Fetch ephemeral client secret
       const tokenRes = await fetch(
         `/api/realtime?personaId=${encodeURIComponent(persona.id)}`
       );
@@ -130,7 +115,7 @@ export function useRealtimeConversation(persona: Persona | null) {
       const token: string = data.client_secret?.value;
       if (!token) throw new Error(`No token in response: ${JSON.stringify(data)}`);
 
-      // 2. Build the persona agent (instructions + voice set here)
+      // 2. Build the persona agent
       const instructions = [persona.systemPrompt, persona.voiceInstructions]
         .filter(Boolean)
         .join("\n\n");
@@ -141,12 +126,10 @@ export function useRealtimeConversation(persona: Persona | null) {
         voice: persona.voice,
       });
 
-      // 3. Custom WebRTC transport:
-      //    – override pc.ontrack to route remote audio through Web Audio API
-      //      (bypasses iOS silent switch; feeds the volume-glow analyser)
-      //    – the SDK sets pc.ontrack = (e) => audioEl.srcObject = e.streams[0]
-      //      before calling changePeerConnection, so reassigning ontrack here
-      //      replaces the SDK's default playback path entirely.
+      // 3. Custom WebRTC transport: override pc.ontrack to route remote audio
+      //    through Web Audio API (iOS silent-switch bypass + volume-glow analyser).
+      //    The SDK sets pc.ontrack before calling changePeerConnection, so
+      //    reassigning it here replaces the SDK's default <audio> playback path.
       const transport = new OpenAIRealtimeWebRTC({
         changePeerConnection: async (pc) => {
           pc.ontrack = (event) => {
@@ -159,8 +142,7 @@ export function useRealtimeConversation(persona: Persona | null) {
         },
       });
 
-      // 4. Create session: model locked to gpt-realtime-mini, Spanish transcription,
-      //    server VAD tuned for natural speech pacing.
+      // 4. Create session — transcription disabled (no text display needed)
       const session = new RealtimeSession(agent, {
         transport,
         model: "gpt-realtime-mini",
@@ -168,7 +150,7 @@ export function useRealtimeConversation(persona: Persona | null) {
         config: {
           audio: {
             input: {
-              transcription: { model: "gpt-4o-mini-transcribe", language: "es" },
+              transcription: null,
               turnDetection: {
                 type: "server_vad",
                 silenceDurationMs: 800,
@@ -181,93 +163,39 @@ export function useRealtimeConversation(persona: Persona | null) {
       });
       sessionRef.current = session;
 
-      // 5. Wire raw data-channel events for BatchState + transcript accumulation
+      // 5. Wire events
+
+      // VAD signals — drive button colour
       session.on("transport_event", (event) => {
-        const e = event as { type: string; [key: string]: unknown };
-
-        switch (e.type) {
-          // User started speaking — reset accumulators for the new turn
-          case "input_audio_buffer.speech_started":
-            pendingTranscriptRef.current = "";
-            pendingReplyRef.current = "";
-            setCurrentTranscript("");
-            setCurrentReply("");
-            setBatchState("recording");
-            setSpeechDetected(true);
-            setErrorMessage(null);
-            break;
-
-          // User stopped speaking — waiting for model response
-          case "input_audio_buffer.speech_stopped":
-            setBatchState("processing");
-            setSpeechDetected(false);
-            break;
-
-          // User's speech transcription ready
-          case "conversation.item.input_audio_transcription.completed": {
-            const transcript = (e.transcript as string) ?? "";
-            pendingTranscriptRef.current = transcript;
-            setCurrentTranscript(transcript);
-            break;
-          }
-
-          // Model begins generating a response
-          case "response.created":
-            setBatchState("playing");
-            break;
-
-          // Streaming transcript of what the model is saying
-          case "response.audio_transcript.delta": {
-            const delta = (e.delta as string) ?? "";
-            pendingReplyRef.current += delta;
-            setCurrentReply((prev) => prev + delta);
-            break;
-          }
-
-          // Response fully done — commit to conversation history
-          case "response.done": {
-            const finalTranscript = pendingTranscriptRef.current;
-            const finalReply = pendingReplyRef.current;
-            pendingTranscriptRef.current = "";
-            pendingReplyRef.current = "";
-            if (finalTranscript || finalReply) {
-              setMessages((prev) => [
-                ...prev,
-                { role: "user", content: finalTranscript },
-                { role: "assistant", content: finalReply },
-              ]);
-            }
-            setCurrentTranscript("");
-            setCurrentReply("");
-            setBatchState("idle");
-            break;
-          }
-
-          case "error": {
-            const errMsg =
-              (e.error as { message?: string } | undefined)?.message ??
-              "Error desconocido";
-            setErrorMessage(errMsg);
-            setBatchState("error");
-            break;
-          }
+        const e = event as { type: string };
+        if (e.type === "input_audio_buffer.speech_started") {
+          setSpeechDetected(true);
+          setErrorMessage(null);
+        }
+        if (e.type === "input_audio_buffer.speech_stopped") {
+          setSpeechDetected(false);
         }
       });
 
-      // Session-level error handler (covers SDK/transport errors not in data channel)
+      // Model audio signals — drive glow
+      session.on("audio_start",       () => setIsModelSpeaking(true));
+      session.on("audio_stopped",     () => setIsModelSpeaking(false));
+      session.on("audio_interrupted", () => setIsModelSpeaking(false));
+
+      // Errors
       session.on("error", ({ error }) => {
         const msg = error instanceof Error ? error.message : String(error);
         setErrorMessage(msg);
-        setBatchState("error");
+        setConnectionState("error");
       });
 
-      // 6. Connect — SDK handles: getUserMedia, RTCPeerConnection, SDP to /v1/realtime/calls,
-      //    session.update with agent instructions + VAD/transcription config.
+      // 6. Connect — SDK handles getUserMedia, RTCPeerConnection, SDP exchange,
+      //    session.update with agent instructions + VAD config.
       await session.connect({ apiKey: token });
 
       conversationActiveRef.current = true;
       setConversationActive(true);
-      setBatchState("idle");
+      setConnectionState("active");
 
       navigator.wakeLock
         ?.request("screen")
@@ -278,7 +206,7 @@ export function useRealtimeConversation(persona: Persona | null) {
       const msg = err instanceof Error ? err.message : "Error al conectar";
       console.error("[useRealtimeConversation] startConversation failed:", msg);
       setErrorMessage(msg);
-      setBatchState("error");
+      setConnectionState("error");
     }
   }, [persona, teardown]);
 
@@ -287,23 +215,23 @@ export function useRealtimeConversation(persona: Persona | null) {
   const stopConversation = useCallback(() => {
     conversationActiveRef.current = false;
     setConversationActive(false);
+    setSpeechDetected(false);
+    setIsModelSpeaking(false);
     teardown();
-    setBatchState("idle");
+    setConnectionState("idle");
   }, [teardown]);
 
   const reset = useCallback(() => {
     conversationActiveRef.current = false;
     setConversationActive(false);
-    teardown();
-    setMessages([]);
-    setCurrentTranscript("");
-    setCurrentReply("");
-    setErrorMessage(null);
     setSpeechDetected(false);
-    setBatchState("idle");
+    setIsModelSpeaking(false);
+    teardown();
+    setErrorMessage(null);
+    setConnectionState("idle");
   }, [teardown]);
 
-  // Re-acquire wake lock when the page becomes visible (OS releases it on page hide)
+  // Re-acquire wake lock when the page becomes visible
   useEffect(() => {
     const reacquire = () => {
       if (document.visibilityState === "visible" && conversationActiveRef.current) {
@@ -318,16 +246,12 @@ export function useRealtimeConversation(persona: Persona | null) {
   }, []);
 
   return {
-    batchState,
-    micReady: true, // no pre-flight needed; permission requested in startConversation
-    messages,
-    errorMessage,
-    currentTranscript,
-    currentReply,
-    playbackVolume,
+    connectionState,
     conversationActive,
     speechDetected,
-    prepareMic: async () => {}, // no-op — kept for ConversationPage compatibility
+    isModelSpeaking,
+    playbackVolume,
+    errorMessage,
     startConversation,
     stopConversation,
     reset,
