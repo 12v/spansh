@@ -21,7 +21,9 @@ export function ConversationButton({
   onToggle,
   disabled = false,
 }: ConversationButtonProps) {
-  const isListening = conversationActive && batchState === "recording" && !speechDetected;
+  const isConnecting = batchState === "connecting";
+  // "idle" while active = waiting for first/next utterance — treat as listening
+  const isListening = conversationActive && (batchState === "idle" || (batchState === "recording" && !speechDetected));
   const isSpeaking = conversationActive && batchState === "recording" && speechDetected;
   const isProcessing = batchState === "processing";
   const isPlaying = batchState === "playing";
@@ -41,7 +43,7 @@ export function ConversationButton({
   return (
     <button
       onClick={onToggle}
-      disabled={disabled}
+      disabled={disabled || isConnecting}
       style={style}
       className={cn(
         "relative flex items-center justify-center",
@@ -49,21 +51,22 @@ export function ConversationButton({
         "focus:outline-none",
         !isPlaying && "transition-all duration-200",
         "disabled:opacity-40 disabled:cursor-not-allowed",
-        isSpeaking && "bg-red-500 shadow-[0_0_0_8px_rgba(239,68,68,0.3)] animate-pulse",
-        isListening && "bg-emerald-600 shadow-[0_0_0_6px_rgba(16,185,129,0.25)] animate-[pulse_2s_ease-in-out_infinite]",
+        isSpeaking   && "bg-red-500 shadow-[0_0_0_8px_rgba(239,68,68,0.3)] animate-pulse",
+        isListening  && "bg-emerald-600 shadow-[0_0_0_6px_rgba(16,185,129,0.25)] animate-[pulse_2s_ease-in-out_infinite]",
         isProcessing && "bg-gray-700",
-        isPlaying && "bg-indigo-600",
-        !conversationActive && "bg-indigo-600 hover:bg-indigo-500 shadow-[0_0_0_4px_rgba(99,102,241,0.3)] hover:shadow-[0_0_0_8px_rgba(99,102,241,0.25)]"
+        isConnecting && "bg-gray-700",
+        isPlaying    && "bg-indigo-600",
+        !conversationActive && !isConnecting && "bg-indigo-600 hover:bg-indigo-500 shadow-[0_0_0_4px_rgba(99,102,241,0.3)] hover:shadow-[0_0_0_8px_rgba(99,102,241,0.25)]"
       )}
       aria-label={conversationActive ? "Detener conversación" : "Iniciar conversación"}
     >
-      {isProcessing && (
+      {(isProcessing || isConnecting) && (
         <span className="absolute inset-0 flex items-center justify-center">
           <span className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin" />
         </span>
       )}
       <Mic
-        className={cn("w-10 h-10 text-white", isProcessing && "opacity-30")}
+        className={cn("w-10 h-10 text-white", (isProcessing || isConnecting) && "opacity-30")}
         strokeWidth={1.75}
       />
     </button>

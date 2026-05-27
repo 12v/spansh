@@ -50,11 +50,14 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     }
   }, [conversationActive, startConversation, stopConversation]);
 
+  const isConnecting = batchState === "connecting";
   const isRecording = batchState === "recording";
   const isProcessing = batchState === "processing";
   const isPlaying = batchState === "playing";
 
-  const statusText = conversationActive
+  const statusText = isConnecting
+    ? "Conectando..."
+    : conversationActive
     ? isRecording
       ? speechDetected
         ? "Hablando..."
@@ -65,7 +68,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
         : "Transcribiendo..."
       : isPlaying
       ? "Reproduciendo..."
-      : ""
+      : "Escuchando..."
     : batchState === "error"
     ? ""
     : messages.length === 0

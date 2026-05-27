@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Persona } from "@/lib/personas/types";
 
-export type BatchState = "idle" | "recording" | "processing" | "playing" | "error";
+export type BatchState = "idle" | "connecting" | "recording" | "processing" | "playing" | "error";
 
 export interface ConversationMessage {
   role: "user" | "assistant";
@@ -190,6 +190,7 @@ export function useRealtimeConversation(persona: Persona | null) {
   const startConversation = useCallback(async () => {
     if (!persona || conversationActiveRef.current) return;
     setErrorMessage(null);
+    setBatchState("connecting"); // immediate visual feedback before any async work
 
     // Create AudioContext synchronously inside the gesture handler —
     // iOS Safari requires this before any await or the context starts suspended.
