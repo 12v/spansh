@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Settings } from "lucide-react";
 import type { Persona } from "@/lib/personas/types";
 import { useRealtimeConversation } from "@/lib/realtime/useRealtimeConversation";
@@ -8,6 +8,7 @@ import { useSettings } from "@/lib/settings/useSettings";
 import { SettingsPanel } from "./SettingsPanel";
 import { PersonaSelector } from "./PersonaSelector";
 import { ConversationButton } from "./ConversationButton";
+import { cn } from "@/lib/utils";
 
 interface ConversationPageProps {
   personas: Persona[];
@@ -63,9 +64,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
         ? "Hablando..."
         : "Escuchando..."
       : isProcessing
-      ? currentTranscript
-        ? "Respondiendo..."
-        : "Transcribiendo..."
+      ? "Respondiendo..."
       : isPlaying
       ? "Reproduciendo..."
       : "Escuchando..."
@@ -75,7 +74,21 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     ? "Pulsa para iniciar"
     : "Conversación pausada";
 
-  const showInFlight = (isProcessing || isPlaying) && (currentTranscript || currentReply);
+  // Auto-scroll to bottom as new content arrives
+  const scrollAnchorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    scrollAnchorRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length, currentTranscript, currentReply, speechDetected]);
+
+  // Pulsing placeholder while the user is actively speaking (transcription not yet ready)
+  const showUserSpeaking = isRecording && speechDetected && !currentTranscript;
+
+  // Any in-flight content to display below the history
+  const hasInFlight =
+    showUserSpeaking ||
+    currentTranscript ||
+    currentReply ||
+    ((isProcessing || isPlaying) && !currentTranscript);
 
   return (
     <main className="min-h-screen bg-gray-950 flex flex-col items-center justify-between px-4 py-8 sm:py-12">
@@ -125,46 +138,57 @@ export function ConversationPage({ personas }: ConversationPageProps) {
               <p className="text-gray-500 text-sm mt-1">{selectedPersona.speakingStyle} · {selectedPersona.accentRegion}</p>
             </div>
 
-            {/* Conversation history */}
-            {(messages.length >= 2 || showInFlight) && (
-              <div className="w-full flex flex-col gap-3">
-                {messages.length >= 2 && (() => {
-                  const lastUser = messages[messages.length - 2];
-                  const lastAssistant = messages[messages.length - 1];
-                  const dim = !!showInFlight;
-                  return (
-                    <>
-                      <div className={`self-end max-w-xs rounded-2xl bg-indigo-700 px-4 py-2.5 text-sm text-white transition-opacity ${dim ? "opacity-40" : ""}`}>
-                        {lastUser.content}
-                      </div>
-                      {!settings.listeningMode && (
-                        <div className={`self-start max-w-xs rounded-2xl bg-gray-800 px-4 py-2.5 text-sm text-gray-100 transition-opacity ${dim ? "opacity-40" : ""}`}>
-                          {lastAssistant.content}
-                        </div>
+            {/* Full scrollable transcript */}
+            {(messages.length > 0 || hasInFlight) && (
+              <div className="w-full flex flex-col gap-2 max-h-72 overflow-y-auto">
+                {/* All completed exchanges */}
+                {messages.map((msg, i) =>
+                  msg.role === "assistant" && settings.listeningMode ? null : (
+                    <div
+                      key={i}
+                      className={cn(
+                        "max-w-xs rounded-2xl px-4 py-2.5 text-sm",
+                        msg.role === "user"
+                          ? "self-end bg-indigo-700 text-white"
+                          : "self-start bg-gray-800 text-gray-100"
                       )}
-                    </>
-                  );
-                })()}
-
-                {showInFlight && (
-                  <>
-                    {currentTranscript ? (
-                      <div className="self-end max-w-xs rounded-2xl bg-indigo-700 px-4 py-2.5 text-sm text-white">
-                        {currentTranscript}
-                      </div>
-                    ) : (
-                      <div className="self-end max-w-xs rounded-2xl bg-indigo-700/50 px-4 py-2.5 text-sm text-indigo-300 animate-pulse">
-                        …
-                      </div>
-                    )}
-                    {!settings.listeningMode && currentReply && (
-                      <div className="self-start max-w-xs rounded-2xl bg-gray-800 px-4 py-2.5 text-sm text-gray-100">
-                        {currentReply}
-                        <span className="inline-block w-0.5 h-3.5 bg-gray-400 ml-0.5 animate-pulse align-middle" />
-                      </div>
-                    )}
-                  </>
+                    >
+                      {msg.content}
+                    </div>
+                  )
                 )}
+
+                {/* User speaking — pulsing placeholder until transcription arrives */}
+                {showUserSpeaking && (
+                  <div className="self-end max-w-xs rounded-2xl bg-indigo-700/50 px-4 py-2.5 text-sm text-indigo-300 animate-pulse">
+                    …
+                  </div>
+                )}
+
+                {/* User transcription (appears once speech is processed) */}
+                {currentTranscript && (
+                  <div className="self-end max-w-xs rounded-2xl bg-indigo-700 px-4 py-2.5 text-sm text-white">
+                    {currentTranscript}
+                  </div>
+                )}
+
+                {/* Waiting for transcription placeholder */}
+                {(isProcessing || isPlaying) && !currentTranscript && (
+                  <div className="self-end max-w-xs rounded-2xl bg-indigo-700/50 px-4 py-2.5 text-sm text-indigo-300 animate-pulse">
+                    …
+                  </div>
+                )}
+
+                {/* Streaming assistant reply */}
+                {!settings.listeningMode && currentReply && (
+                  <div className="self-start max-w-xs rounded-2xl bg-gray-800 px-4 py-2.5 text-sm text-gray-100">
+                    {currentReply}
+                    <span className="inline-block w-0.5 h-3.5 bg-gray-400 ml-0.5 animate-pulse align-middle" />
+                  </div>
+                )}
+
+                {/* Scroll anchor */}
+                <div ref={scrollAnchorRef} />
               </div>
             )}
 
@@ -182,7 +206,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
               </p>
             </div>
 
-            {/* Error — kept inside persona view so it's always on-screen */}
+            {/* Error */}
             {errorMessage && (
               <div className="w-full rounded-lg border border-red-800 bg-red-950 px-4 py-3 text-sm text-red-300">
                 {errorMessage}
@@ -208,7 +232,6 @@ export function ConversationPage({ personas }: ConversationPageProps) {
             : ""}
         </p>
       </div>
-
     </main>
   );
 }
