@@ -7,10 +7,15 @@ import {
   OpenAIRealtimeWebRTC,
 } from "@openai/agents-realtime";
 import type { Persona } from "@/lib/personas/types";
+import { DEFAULT_SETTINGS, type Settings } from "@/lib/settings/useSettings";
 
 export type ConnectionState = "idle" | "connecting" | "active" | "error";
 
-export function useRealtimeConversation(persona: Persona | null) {
+export function useRealtimeConversation(persona: Persona | null, settings: Settings = DEFAULT_SETTINGS) {
+  // Keep a ref so startConversation always reads the latest values without
+  // being invalidated (and tearing down an active session) on each slider move.
+  const settingsRef = useRef(settings);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [conversationActive, setConversationActive] = useState(false);
   const [speechDetected, setSpeechDetected] = useState(false);
@@ -153,8 +158,8 @@ export function useRealtimeConversation(persona: Persona | null) {
               transcription: null,
               turnDetection: {
                 type: "server_vad",
-                silenceDurationMs: 800,
-                threshold: 0.5,
+                silenceDurationMs: settingsRef.current.vadSilenceDurationMs,
+                threshold: settingsRef.current.vadThreshold,
                 prefixPaddingMs: 300,
               },
             },

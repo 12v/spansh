@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { Settings } from "lucide-react";
 import type { Persona } from "@/lib/personas/types";
 import { useRealtimeConversation } from "@/lib/realtime/useRealtimeConversation";
+import { useSettings } from "@/lib/settings/useSettings";
 import { PersonaSelector } from "./PersonaSelector";
 import { ConversationButton } from "./ConversationButton";
+import { SettingsPanel } from "./SettingsPanel";
 
 interface ConversationPageProps {
   personas: Persona[];
@@ -12,6 +15,9 @@ interface ConversationPageProps {
 
 export function ConversationPage({ personas }: ConversationPageProps) {
   const [selectedPersona, setSelectedPersona] = useState<Persona | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const { settings, updateSetting } = useSettings();
 
   const {
     connectionState,
@@ -23,7 +29,7 @@ export function ConversationPage({ personas }: ConversationPageProps) {
     startConversation,
     stopConversation,
     reset,
-  } = useRealtimeConversation(selectedPersona);
+  } = useRealtimeConversation(selectedPersona, settings);
 
   const handlePersonaSelect = useCallback((persona: Persona) => {
     setSelectedPersona(persona);
@@ -65,15 +71,32 @@ export function ConversationPage({ personas }: ConversationPageProps) {
           <h1 className="text-xl font-bold text-white tracking-tight">spansh</h1>
           <p className="text-xs text-gray-500 mt-0.5">Práctica de conversación en español</p>
         </div>
-        {selectedPersona && (
+        <div className="flex items-center gap-3">
+          {selectedPersona && (
+            <button
+              onClick={handleReset}
+              className="text-sm text-gray-400 hover:text-white transition-colors"
+            >
+              Cambiar personaje
+            </button>
+          )}
           <button
-            onClick={handleReset}
-            className="text-sm text-gray-400 hover:text-white transition-colors"
+            onClick={() => setSettingsOpen(true)}
+            className="text-gray-500 hover:text-white transition-colors"
+            aria-label="Ajustes"
           >
-            Cambiar personaje
+            <Settings className="w-5 h-5" />
           </button>
-        )}
+        </div>
       </div>
+
+      {settingsOpen && (
+        <SettingsPanel
+          settings={settings}
+          onUpdate={updateSetting}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col items-center justify-center w-full py-8 gap-8">
