@@ -113,6 +113,31 @@ export function ConversationPage({ personas }: ConversationPageProps) {
               </p>
             </div>
 
+            {/* Prompts — read-only, collapsed by default */}
+            <details className="w-full text-xs text-gray-600 group">
+              <summary className="cursor-pointer select-none list-none flex items-center gap-1 hover:text-gray-400 transition-colors w-fit mx-auto">
+                <span className="group-open:hidden">▸</span>
+                <span className="hidden group-open:inline">▾</span>
+                Ver instrucciones
+              </summary>
+              <div className="mt-3 space-y-3">
+                <div>
+                  <p className="text-gray-500 uppercase tracking-wide text-[10px] mb-1">System prompt</p>
+                  <pre className="whitespace-pre-wrap font-mono text-gray-500 bg-gray-900 rounded-lg p-3 leading-relaxed">
+                    {selectedPersona.systemPrompt}
+                  </pre>
+                </div>
+                {selectedPersona.voiceInstructions && (
+                  <div>
+                    <p className="text-gray-500 uppercase tracking-wide text-[10px] mb-1">Voice instructions</p>
+                    <pre className="whitespace-pre-wrap font-mono text-gray-500 bg-gray-900 rounded-lg p-3 leading-relaxed">
+                      {selectedPersona.voiceInstructions}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            </details>
+
             {/* Conversation Button */}
             <div className="flex flex-col items-center gap-4">
               <ConversationButton

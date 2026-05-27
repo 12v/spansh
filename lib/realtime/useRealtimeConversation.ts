@@ -121,7 +121,11 @@ export function useRealtimeConversation(persona: Persona | null, settings: Setti
       if (!token) throw new Error(`No token in response: ${JSON.stringify(data)}`);
 
       // 2. Build the persona agent
-      const instructions = [persona.systemPrompt, persona.voiceInstructions]
+      const instructions = [
+        "Keep responses brief — 1 to 3 sentences. Be natural and conversational, not terse. If the topic genuinely warrants more, stay concise.",
+        persona.systemPrompt,
+        persona.voiceInstructions,
+      ]
         .filter(Boolean)
         .join("\n\n");
 
